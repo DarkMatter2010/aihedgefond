@@ -1,0 +1,14 @@
+trading_limits:
+  max_position_size: 100000.0
+  max_sector_exposure: 0.25
+  max_turnover: 0.20
+  max_daily_drawdown: 0.05
+
+universe:
+  - AAPL
+  - MSFT
+  - SPY
+
+feature_flags:
+  audit_logging: true
+  paper_execution: false
