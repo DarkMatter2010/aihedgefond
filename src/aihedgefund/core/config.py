@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -32,6 +32,14 @@ class Settings(ConfigModel):
     trading_limits: TradingLimits
     universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
     feature_flags: dict[NonEmptyText, bool]
+
+    @field_validator("universe", mode="before")
+    @classmethod
+    def freeze_yaml_sequence(cls, value: object) -> object:
+        """Convert YAML's native list representation to an immutable tuple."""
+        if isinstance(value, list):
+            return tuple(value)
+        return value
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parents[1] / "config" / "limits.yaml"

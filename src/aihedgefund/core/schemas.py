@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated
@@ -45,7 +45,7 @@ class Message(BoundaryDTO):
         if value.utcoffset() != timedelta(0):
             msg = "timestamp must use UTC"
             raise ValueError(msg)
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
 
 class Command(Message):
@@ -173,7 +173,7 @@ class OHLCVRequest(BoundaryDTO):
         if value.utcoffset() != timedelta(0):
             msg = "request timestamps must use UTC"
             raise ValueError(msg)
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @model_validator(mode="after")
     def end_must_follow_start(self) -> OHLCVRequest:
@@ -202,7 +202,7 @@ class OHLCVBar(BoundaryDTO):
         if value.utcoffset() != timedelta(0):
             msg = "timestamp must use UTC"
             raise ValueError(msg)
-        return value.astimezone(timezone.utc)
+        return value.astimezone(UTC)
 
     @model_validator(mode="after")
     def prices_must_form_valid_bar(self) -> OHLCVBar:

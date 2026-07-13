@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
@@ -26,7 +26,7 @@ from aihedgefund.core.schemas import (
     Signal,
 )
 
-NOW = datetime(2026, 1, 2, 15, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 2, 15, 30, tzinfo=UTC)
 ORDER_ID = UUID("00000000-0000-4000-8000-000000000001")
 
 
