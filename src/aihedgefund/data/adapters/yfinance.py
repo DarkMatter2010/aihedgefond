@@ -78,6 +78,11 @@ class YFinanceProvider(MarketDataProvider):
 
         result = BarFrame(bars=bars, dividends=dividends, splits=splits)
         for symbol, frame in result.bars.items():
+            self._quality_gate.validate_corporate_actions(
+                result.dividends[symbol],
+                result.splits[symbol],
+                symbol,
+            )
             self._quality_gate.validate(frame, symbol)
         self._bus.publish_event(
             DataIngested(
