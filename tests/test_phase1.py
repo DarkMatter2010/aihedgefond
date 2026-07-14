@@ -9,19 +9,23 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from statsmodels.tsa.stattools import adfuller
 
 import aihedgefund.data.adapters.yfinance as yfinance_adapter
 from aihedgefund.core.bus import InProcessMessageBus
 from aihedgefund.core.config import LabelSettings, QualitySettings, load_settings
+from aihedgefund.core.runtime import FrozenClock, SeededIdProvider
 from aihedgefund.core.schemas import (
     BarFrame,
+    CorporateActionInput,
     DataIngested,
     FeaturesComputed,
     LabelsComputed,
+    MarketDataRequest,
     OHLCVBar,
     OHLCVRequest,
+    PointInTimeFrame,
     QualityGateFailed,
     QualityReportProduced,
 )
@@ -34,7 +38,7 @@ from aihedgefund.data.provider import (
 )
 from aihedgefund.data.quality import DataQualityError, DataQualityGate
 from aihedgefund.features.pipeline import (
-    FeatureParameters,
+    FEATURE_COLUMNS,
     FeaturePipeline,
     to_feature_vectors,
 )
@@ -83,6 +87,36 @@ def bar_frame(frame: pd.DataFrame | None = None) -> BarFrame:
     )
 
 
+def market_data_request(
+    frame: pd.DataFrame,
+    symbols: tuple[str, ...] = ("AAPL",),
+) -> MarketDataRequest:
+    """Build a typed request spanning a synthetic frame."""
+    return MarketDataRequest(
+        symbols=symbols,
+        start=frame.index[0].to_pydatetime(),
+        end=(frame.index[-1] + pd.Timedelta(days=1)).to_pydatetime(),
+        frequency="1d",
+    )
+
+
+def yfinance_fixture(frame: pd.DataFrame) -> pd.DataFrame:
+    """Convert canonical synthetic bars to an in-memory Yahoo response."""
+    result = frame.rename(
+        columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "adj_close": "Adj Close",
+            "volume": "Volume",
+        }
+    )
+    result["Dividends"] = 0.0
+    result["Stock Splits"] = 0.0
+    return result
+
+
 def test_yfinance_fixture_is_canonical_utc_and_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -109,13 +143,21 @@ def test_yfinance_fixture_is_canonical_utc_and_validated(
     bus = InProcessMessageBus()
     ingested: list[DataIngested] = []
     bus.subscribe_event(DataIngested, ingested.append)
-    provider = YFinanceProvider({"APPLE": "AAPL"}, bus)
+    clock = FrozenClock(source.index[-1].tz_localize("UTC").to_pydatetime())
+    provider = YFinanceProvider(
+        {"APPLE": "AAPL"},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
 
     result = provider.get_ohlcv(
-        ("APPLE",),
-        datetime(2025, 1, 1, tzinfo=UTC),
-        datetime(2025, 2, 1, tzinfo=UTC),
-        "1d",
+        MarketDataRequest(
+            symbols=("APPLE",),
+            start=datetime(2025, 1, 1, tzinfo=UTC),
+            end=datetime(2025, 2, 1, tzinfo=UTC),
+            frequency="1d",
+        )
     )
 
     canonical = result.bars["APPLE"]
@@ -131,6 +173,8 @@ def test_yfinance_fixture_is_canonical_utc_and_validated(
     assert str(canonical.index.tz) == "UTC"
     assert result.dividends["APPLE"].eq(0.0).all()
     assert ingested[0].rows == {"APPLE": 8}
+    assert ingested[0].payload.data == result
+    assert ingested[0].timestamp == clock.now()
     first = canonical.iloc[0]
     validated_bar = OHLCVBar(
         symbol="APPLE",
@@ -142,6 +186,62 @@ def test_yfinance_fixture_is_canonical_utc_and_validated(
         volume=Decimal(str(first["volume"])),
     )
     assert validated_bar.symbol == "APPLE"
+
+
+@pytest.mark.parametrize("corruption", ["stale", "nan_ratio", "outlier"])
+def test_ingest_quality_gate_blocks_bad_frames_before_features(
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    canonical = synthetic_ohlcv(60)
+    if corruption == "nan_ratio":
+        canonical.iloc[20, canonical.columns.get_loc("close")] = np.nan
+    elif corruption == "outlier":
+        canonical.iloc[30, canonical.columns.get_loc("close")] *= 10.0
+    source = yfinance_fixture(canonical)
+    monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
+
+    checked_at = canonical.index[-1]
+    if corruption == "stale":
+        checked_at += pd.Timedelta(days=8)
+    clock = FrozenClock(checked_at.to_pydatetime())
+    bus = InProcessMessageBus()
+    ingested: list[DataIngested] = []
+    features: list[FeaturesComputed] = []
+    bus.subscribe_event(DataIngested, ingested.append)
+    bus.subscribe_event(FeaturesComputed, features.append)
+    provider = YFinanceProvider(
+        {},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
+
+    with pytest.raises(DataQualityError):
+        bars = provider.get_ohlcv(market_data_request(canonical))
+        FeaturePipeline(bus, clock=clock).compute(bars)
+
+    assert ingested == []
+    assert features == []
+
+
+def test_ingest_rejects_missing_corporate_action_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = synthetic_ohlcv(20)
+    source = yfinance_fixture(canonical).drop(columns="Stock Splits")
+    monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
+    clock = FrozenClock(canonical.index[-1].to_pydatetime())
+    bus = InProcessMessageBus()
+    provider = YFinanceProvider(
+        {},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
+
+    with pytest.raises(DataUnavailableError, match="required action column"):
+        provider.get_ohlcv(market_data_request(canonical))
 
 
 def test_quality_gate_passes_clean_data_and_emits_report() -> None:
@@ -215,21 +315,25 @@ def test_corporate_action_adjustment_handles_split_and_dividend_exactly() -> Non
     splits = pd.Series([0.0, 0.0, 2.0, 0.0], index=index)
     dividends = pd.Series(0.0, index=index)
 
-    adjusted = adjust_corporate_actions(raw, splits, dividends)
+    adjusted = adjust_corporate_actions(
+        CorporateActionInput(raw_close=raw, splits=splits, dividends=dividends)
+    )
 
-    assert adjusted.loc[index[1], "split_adjusted"] == pytest.approx(51.0)
-    assert adjusted.loc[index[2], "split_adjusted"] == pytest.approx(51.0)
-    assert raw.iloc[0] / adjusted["split_adjusted"].iloc[0] == pytest.approx(2.0)
+    assert adjusted.split_adjusted.loc[index[1]] == pytest.approx(102.0)
+    assert adjusted.split_adjusted.loc[index[2]] == pytest.approx(102.0)
+    assert adjusted.raw_close.loc[index[0]] == adjusted.split_adjusted.loc[index[0]]
 
     dividend_raw = pd.Series([100.0, 99.0], index=index[:2])
     dividend = pd.Series([0.0, 1.0], index=index[:2])
     dividend_adjusted = adjust_corporate_actions(
-        dividend_raw,
-        pd.Series(0.0, index=index[:2]),
-        dividend,
+        CorporateActionInput(
+            raw_close=dividend_raw,
+            splits=pd.Series(0.0, index=index[:2]),
+            dividends=dividend,
+        )
     )
-    assert dividend_adjusted["total_return_adjusted"].iloc[0] == pytest.approx(99.0)
-    assert dividend_adjusted["total_return_adjusted"].iloc[1] == pytest.approx(99.0)
+    assert dividend_adjusted.as_of_adjusted.iloc[0] == pytest.approx(100.0)
+    assert dividend_adjusted.as_of_adjusted.iloc[1] == pytest.approx(100.0)
 
 
 def test_pit_join_never_selects_t_plus_one_sentinel() -> None:
@@ -243,7 +347,10 @@ def test_pit_join_never_selects_t_plus_one_sentinel() -> None:
         }
     )
 
-    joined = pit_join(features, targets)
+    joined = pit_join(
+        PointInTimeFrame(frame=features),
+        PointInTimeFrame(frame=targets),
+    ).frame
 
     assert joined.loc[0, "value"] == 7.0
     assert joined.loc[0, "target_timestamp"] <= joined.loc[0, "timestamp"]
@@ -260,30 +367,26 @@ def test_pit_join_rejects_symbol_mismatch_and_duplicate_keys() -> None:
     )
     symbol_free_targets = pd.DataFrame({"timestamp": [timestamp], "value": [2.0]})
     with pytest.raises(ValueError, match="symbol must be present"):
-        pit_join(symbol_features, symbol_free_targets)
+        pit_join(
+            PointInTimeFrame(frame=symbol_features),
+            PointInTimeFrame(frame=symbol_free_targets),
+        )
 
     duplicate_targets = pd.concat((symbol_free_targets, symbol_free_targets))
     with pytest.raises(ValueError, match="keys must be unique"):
-        pit_join(symbol_features.drop(columns="symbol"), duplicate_targets)
+        pit_join(
+            PointInTimeFrame(frame=symbol_features.drop(columns="symbol")),
+            PointInTimeFrame(frame=duplicate_targets),
+        )
 
 
 def test_feature_pipeline_is_causal_and_produces_phase0_dtos() -> None:
     source = synthetic_ohlcv(80)
-    parameters = FeatureParameters(
-        volatility_span=5,
-        momentum_periods=3,
-        moving_average_window=5,
-        rsi_period=5,
-        macd_fast=3,
-        macd_slow=6,
-        macd_signal=3,
-        atr_period=5,
-        zscore_window=5,
-    )
     bus = InProcessMessageBus()
     events: list[FeaturesComputed] = []
     bus.subscribe_event(FeaturesComputed, events.append)
-    pipeline = FeaturePipeline(bus, parameters)
+    clock = FrozenClock(source.index[-1].to_pydatetime())
+    pipeline = FeaturePipeline(bus, clock=clock)
 
     full = pipeline.compute(bar_frame(source))
     anchor = source.index[50]
@@ -297,11 +400,15 @@ def test_feature_pipeline_is_causal_and_produces_phase0_dtos() -> None:
     assert vectors
     assert vectors[-1].symbol == "AAPL"
     assert events[0].rows == len(source)
+    assert tuple(full.columns) == FEATURE_COLUMNS
+    assert tuple(str(dtype) for dtype in full.dtypes) == ("float64",) * len(FEATURE_COLUMNS)
+    assert full.index.names == ["timestamp", "symbol"]
+    assert full.index.is_monotonic_increasing
 
 
 def test_feature_pipeline_explicitly_adjusts_a_split() -> None:
-    index = pd.date_range("2025-01-01", periods=8, freq="D", tz="UTC")
-    close = np.array([100.0, 100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 50.0])
+    index = pd.date_range("2025-01-01", periods=50, freq="D", tz="UTC")
+    close = np.r_[np.full(30, 100.0), np.full(20, 50.0)]
     frame = pd.DataFrame(
         {
             "open": close,
@@ -313,28 +420,124 @@ def test_feature_pipeline_explicitly_adjusts_a_split() -> None:
         },
         index=index,
     )
-    splits = pd.Series([0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0], index=index)
+    splits = pd.Series(0.0, index=index)
+    splits.iloc[30] = 2.0
     bars = BarFrame(
         bars={"AAPL": frame},
         dividends={"AAPL": pd.Series(0.0, index=index)},
         splits={"AAPL": splits},
     )
-    parameters = FeatureParameters(
-        volatility_span=2,
-        momentum_periods=1,
-        moving_average_window=2,
-        rsi_period=2,
-        macd_fast=1,
-        macd_slow=2,
-        macd_signal=1,
-        atr_period=2,
-        zscore_window=2,
+    matrix = FeaturePipeline(InProcessMessageBus()).compute(bars)
+
+    assert matrix.loc[(index[30], "AAPL"), "log_return"] == pytest.approx(0.0)
+    assert matrix.loc[(index[30], "AAPL"), "momentum_20"] == pytest.approx(0.0)
+
+
+def test_future_corporate_action_cannot_change_past_features_or_labels() -> None:
+    source = synthetic_ohlcv()
+    baseline = bar_frame(source)
+    split_time = source.index[120]
+    future_splits = pd.Series(0.0, index=source.index)
+    future_splits.loc[split_time] = 2.0
+    with_future_action = BarFrame(
+        bars={"AAPL": source},
+        dividends={"AAPL": pd.Series(0.0, index=source.index)},
+        splits={"AAPL": future_splits},
+    )
+    clock = FrozenClock(source.index[-1].to_pydatetime())
+
+    baseline_features = FeaturePipeline(
+        InProcessMessageBus(),
+        clock=clock,
+    ).compute(baseline)
+    future_features = FeaturePipeline(
+        InProcessMessageBus(),
+        clock=clock,
+    ).compute(with_future_action)
+    past_rows = baseline_features.index.get_level_values("timestamp") < split_time
+    pd.testing.assert_frame_equal(
+        baseline_features.loc[past_rows],
+        future_features.loc[past_rows],
+        check_exact=True,
     )
 
-    matrix = FeaturePipeline(InProcessMessageBus(), parameters).compute(bars)
+    settings = LabelSettings(
+        vol_span=20,
+        cusum_threshold=0.02,
+        pt=1.0,
+        sl=1.0,
+        vertical_bars=5,
+    )
+    label_events = tuple(source.index[position] for position in (40, 70, 100, 130))
+    baseline_labels = LabelPipeline(
+        settings,
+        InProcessMessageBus(),
+        clock=clock,
+    ).compute_from_bars(baseline, "AAPL", label_events)
+    future_labels = LabelPipeline(
+        settings,
+        InProcessMessageBus(),
+        clock=clock,
+    ).compute_from_bars(with_future_action, "AAPL", label_events)
 
-    assert matrix.loc[(index[4], "AAPL"), "log_return"] == pytest.approx(0.0)
-    assert matrix.loc[(index[4], "AAPL"), "momentum_1"] == pytest.approx(0.0)
+    assert tuple(sample for sample in baseline_labels if sample.t1 < split_time) == tuple(
+        sample for sample in future_labels if sample.t1 < split_time
+    )
+
+
+def test_full_phase1_runs_are_deterministic_with_injected_runtime_providers() -> None:
+    source = synthetic_ohlcv()
+    bars = bar_frame(source)
+    clock = FrozenClock(source.index[-1].to_pydatetime())
+    settings = LabelSettings(
+        vol_span=20,
+        cusum_threshold=0.02,
+        pt=1.0,
+        sl=1.0,
+        vertical_bars=5,
+    )
+    label_events = tuple(source.index[position] for position in (40, 70, 100))
+
+    def run_once() -> tuple[
+        pd.DataFrame,
+        tuple[object, ...],
+        tuple[object, ...],
+        tuple[FeaturesComputed, ...],
+        tuple[LabelsComputed, ...],
+    ]:
+        bus = InProcessMessageBus()
+        feature_events: list[FeaturesComputed] = []
+        label_output_events: list[LabelsComputed] = []
+        bus.subscribe_event(FeaturesComputed, feature_events.append)
+        bus.subscribe_event(LabelsComputed, label_output_events.append)
+        matrix = FeaturePipeline(bus, clock=clock).compute(bars)
+        vectors = to_feature_vectors(
+            matrix,
+            feature_set_version="phase1",
+            id_provider=SeededIdProvider(SEED),
+        )
+        labels = LabelPipeline(settings, bus, clock=clock).compute_from_bars(
+            bars,
+            "AAPL",
+            label_events,
+        )
+        return (
+            matrix,
+            vectors,
+            labels,
+            tuple(feature_events),
+            tuple(label_output_events),
+        )
+
+    first = run_once()
+    second = run_once()
+
+    pd.testing.assert_frame_equal(first[0], second[0], check_exact=True)
+    assert first[1:] == second[1:]
+    assert [vector.feature_vector_id for vector in first[1]] == [
+        vector.feature_vector_id for vector in second[1]
+    ]
+    assert all(event.timestamp == clock.now() for event in (*first[3], *first[4]))
 
 
 def _barrier_result(
@@ -485,12 +688,9 @@ class _FakeProvider(MarketDataProvider):
 
     def get_ohlcv(
         self,
-        symbols: tuple[str, ...],
-        start: datetime,
-        end: datetime,
-        frequency: str,
+        request: MarketDataRequest,
     ) -> BarFrame:
-        del symbols, start, end, frequency
+        del request
         self.calls += 1
         if isinstance(self.result, Exception):
             raise self.result
@@ -501,13 +701,9 @@ def test_provider_fallback_and_exhaustion_are_explicit() -> None:
     primary = _FakeProvider(DataUnavailableError("primary unavailable"))
     secondary = _FakeProvider(bar_frame())
     chain = ProviderChain((primary, secondary), max_attempts=1)
+    request = market_data_request(synthetic_ohlcv())
 
-    result = chain.get_ohlcv(
-        ("AAPL",),
-        datetime(2025, 1, 1, tzinfo=UTC),
-        datetime(2025, 12, 31, tzinfo=UTC),
-        "1d",
-    )
+    result = chain.get_ohlcv(request)
 
     assert result is secondary.result
     assert primary.calls == secondary.calls == 1
@@ -520,12 +716,38 @@ def test_provider_fallback_and_exhaustion_are_explicit() -> None:
         max_attempts=2,
     )
     with pytest.raises(DataUnavailableError, match="all market-data providers failed"):
-        both_fail.get_ohlcv(
-            ("AAPL",),
-            datetime(2025, 1, 1, tzinfo=UTC),
-            datetime(2025, 12, 31, tzinfo=UTC),
-            "1d",
+        both_fail.get_ohlcv(request)
+
+
+def test_provider_chain_rejects_partial_symbol_responses() -> None:
+    request = market_data_request(synthetic_ohlcv(), ("AAPL", "MSFT"))
+    chain = ProviderChain((_FakeProvider(bar_frame()),), max_attempts=1)
+
+    with pytest.raises(DataUnavailableError, match="missing=\\['MSFT'\\]"):
+        chain.get_ohlcv(request)
+
+
+def test_ingest_and_corporate_action_boundaries_reject_wrong_types() -> None:
+    index = pd.date_range("2025-01-01", periods=2, freq="D", tz="UTC")
+    with pytest.raises(ValidationError):
+        MarketDataRequest.model_validate(
+            {
+                "symbols": ["AAPL"],
+                "start": index[0].to_pydatetime(),
+                "end": index[1].to_pydatetime(),
+                "frequency": "1d",
+            }
         )
+    with pytest.raises(ValidationError):
+        CorporateActionInput.model_validate(
+            {
+                "raw_close": [100.0, 101.0],
+                "splits": pd.Series(0.0, index=index),
+                "dividends": pd.Series(0.0, index=index),
+            }
+        )
+    with pytest.raises(ValidationError):
+        PointInTimeFrame.model_validate({"frame": "not-a-dataframe"})
 
 
 def test_phase0_data_vendor_port_is_preserved_by_compatibility_adapter() -> None:
