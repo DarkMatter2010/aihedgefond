@@ -5,6 +5,8 @@ from __future__ import annotations
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype
 
+from aihedgefund.core.schemas import PointInTimeFrame
+
 
 def assert_no_lookahead(df: pd.DataFrame, anchor_col: str) -> None:
     """Raise when any timestamp-bearing column is later than its row anchor."""
@@ -22,10 +24,13 @@ def assert_no_lookahead(df: pd.DataFrame, anchor_col: str) -> None:
             raise ValueError(msg)
 
 
-def pit_join(features: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
+def pit_join(
+    features: PointInTimeFrame,
+    targets: PointInTimeFrame,
+) -> PointInTimeFrame:
     """Backward-asof join targets onto feature anchors without future matches."""
-    left = _timestamp_column(features, "timestamp")
-    right = _timestamp_column(targets, "timestamp").rename(
+    left = _timestamp_column(features.frame, "timestamp")
+    right = _timestamp_column(targets.frame, "timestamp").rename(
         columns={"timestamp": "target_timestamp"}
     )
     left_has_symbol = "symbol" in left
@@ -54,7 +59,7 @@ def pit_join(features: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
         suffixes=("", "_target"),
     )
     assert_no_lookahead(joined, "timestamp")
-    return joined
+    return PointInTimeFrame(frame=joined)
 
 
 def _timestamp_column(frame: pd.DataFrame, name: str) -> pd.DataFrame:

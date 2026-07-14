@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from math import isfinite
+from typing import Literal
 
 import pandas as pd
 
 from aihedgefund.core.bus import MessageBus
+from aihedgefund.core.runtime import Clock, IdProvider, SystemClock, Uuid4IdProvider
 from aihedgefund.core.schemas import (
     BarFrame,
+    CorporateActionInput,
+    FeatureMatrixPayload,
     FeaturesComputed,
     FeatureValue,
     FeatureVector,
@@ -27,6 +30,29 @@ from aihedgefund.features.indicators import (
     rsi,
 )
 from aihedgefund.features.pit import assert_no_lookahead
+
+FEATURE_COLUMNS = (
+    "log_return",
+    "realized_vol_20",
+    "momentum_20",
+    "ma_ratio_20",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "atr_14",
+    "close_zscore_20",
+)
+FEATURE_DTYPES: tuple[Literal["float64"], ...] = (
+    "float64",
+    "float64",
+    "float64",
+    "float64",
+    "float64",
+    "float64",
+    "float64",
+    "float64",
+    "float64",
+)
 
 
 @dataclass(frozen=True)
@@ -78,9 +104,15 @@ class FeaturePipeline:
         self,
         bus: MessageBus,
         parameters: FeatureParameters | None = None,
+        *,
+        clock: Clock | None = None,
     ) -> None:
         self._bus = bus
         self._parameters = parameters or FeatureParameters()
+        if self._parameters != FeatureParameters():
+            msg = "FeaturePipeline requires the fixed Phase 1 feature parameters"
+            raise ValueError(msg)
+        self._clock = clock or SystemClock()
 
     def compute(self, bars: BarFrame) -> pd.DataFrame:
         """Return a sorted MultiIndex matrix without feeding labels into features."""
@@ -97,6 +129,9 @@ class FeaturePipeline:
         }
         matrix = pd.concat(per_symbol, names=("symbol", "timestamp"))
         matrix = matrix.reorder_levels(("timestamp", "symbol")).sort_index()
+        matrix = matrix.loc[:, list(FEATURE_COLUMNS)].astype(
+            {column: "float64" for column in FEATURE_COLUMNS}
+        )
 
         timestamps = matrix.index.get_level_values("timestamp")
         provenance = pd.DataFrame(
@@ -106,9 +141,13 @@ class FeaturePipeline:
         assert_no_lookahead(provenance, "anchor_timestamp")
         self._bus.publish_event(
             FeaturesComputed(
-                timestamp=datetime.now(UTC),
-                symbols=tuple(per_symbol),
-                rows=len(matrix),
+                timestamp=self._clock.now(),
+                payload=FeatureMatrixPayload(
+                    symbols=tuple(per_symbol),
+                    rows=len(matrix),
+                    columns=FEATURE_COLUMNS,
+                    dtypes=FEATURE_DTYPES,
+                ),
             )
         )
         return matrix
@@ -118,8 +157,10 @@ def to_feature_vectors(
     matrix: pd.DataFrame,
     *,
     feature_set_version: str,
+    id_provider: IdProvider | None = None,
 ) -> tuple[FeatureVector, ...]:
     """Convert complete finite matrix rows into existing Phase 0 DTOs."""
+    ids = id_provider or Uuid4IdProvider()
     vectors: list[FeatureVector] = []
     for (timestamp, symbol), row in matrix.iterrows():
         values = tuple(
@@ -131,6 +172,7 @@ def to_feature_vectors(
             continue
         vectors.append(
             FeatureVector(
+                feature_vector_id=ids.new_id(),
                 timestamp=pd.Timestamp(timestamp).to_pydatetime(),
                 symbol=str(symbol),
                 features=values,
@@ -145,10 +187,15 @@ def _adjusted_feature_frame(
     splits: pd.Series,
     dividends: pd.Series,
 ) -> pd.DataFrame:
-    adjusted_close = adjust_corporate_actions(frame["close"], splits, dividends)
-    total_return_close = adjusted_close["total_return_adjusted"]
-    adjustment_factor = frame["close"].astype(float) / total_return_close
+    adjustment = adjust_corporate_actions(
+        CorporateActionInput(
+            raw_close=frame["close"],
+            splits=splits,
+            dividends=dividends,
+        )
+    )
+    adjustment_factor = adjustment.as_of_adjusted / adjustment.raw_close
     adjusted = frame.copy()
     for column in ("open", "high", "low", "close"):
-        adjusted[column] = frame[column].astype(float) / adjustment_factor
+        adjusted[column] = frame[column].astype(float) * adjustment_factor
     return adjusted
