@@ -12,3 +12,28 @@ universe:
 feature_flags:
   audit_logging: true
   paper_execution: false
+
+start: 2015-01-01
+end: 2026-01-01
+frequency: 1d
+
+symbol_aliases:
+  SP500: ^GSPC
+
+quality:
+  max_nan_ratio: 0.0
+  max_abs_logret: 0.30
+  stale_bars: 5
+  zscore_cap: 8.0
+  max_last_bar_age_days: 7
+
+labels:
+  vol_span: 20
+  cusum_threshold: 0.02
+  pt: 1.0
+  sl: 1.0
+  vertical_bars: 10
+
+fracdiff:
+  d: 0.40
+  thresh: 0.0001

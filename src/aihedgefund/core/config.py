@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -26,12 +34,46 @@ class TradingLimits(ConfigModel):
     max_daily_drawdown: Annotated[float, Field(gt=0, le=1)]
 
 
+class QualitySettings(ConfigModel):
+    """Hard-fail thresholds for the market-data quality gate."""
+
+    max_nan_ratio: Annotated[float, Field(ge=0, le=1)]
+    max_abs_logret: Annotated[float, Field(gt=0)]
+    stale_bars: Annotated[int, Field(ge=2)]
+    zscore_cap: Annotated[float, Field(gt=0)]
+    max_last_bar_age_days: Annotated[int, Field(ge=0)]
+
+
+class LabelSettings(ConfigModel):
+    """Event sampling and triple-barrier parameters."""
+
+    vol_span: Annotated[int, Field(ge=2)]
+    cusum_threshold: Annotated[float, Field(gt=0)]
+    pt: Annotated[float, Field(gt=0)]
+    sl: Annotated[float, Field(gt=0)]
+    vertical_bars: Annotated[int, Field(ge=1)]
+
+
+class FracDiffSettings(ConfigModel):
+    """Fixed-width fractional-differentiation parameters."""
+
+    d: Annotated[float, Field(ge=0, le=1)]
+    thresh: Annotated[float, Field(gt=0, lt=1)]
+
+
 class Settings(ConfigModel):
-    """Complete Phase 0 application settings."""
+    """Complete application settings, additively extended for Phase 1."""
 
     trading_limits: TradingLimits
     universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
     feature_flags: dict[NonEmptyText, bool]
+    start: date
+    end: date
+    frequency: Literal["1d"]
+    symbol_aliases: dict[NonEmptyText, NonEmptyText]
+    quality: QualitySettings
+    labels: LabelSettings
+    fracdiff: FracDiffSettings
 
     @field_validator("universe", mode="before")
     @classmethod
@@ -40,6 +82,14 @@ class Settings(ConfigModel):
         if isinstance(value, list):
             return tuple(value)
         return value
+
+    @model_validator(mode="after")
+    def end_must_follow_start(self) -> Settings:
+        """Reject empty or reversed market-data windows."""
+        if self.end <= self.start:
+            msg = "end must be later than start"
+            raise ValueError(msg)
+        return self
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).parents[1] / "config" / "limits.yaml"

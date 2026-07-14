@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
+import pandas as pd
 from pydantic import (
     AwareDatetime,
     BaseModel,
@@ -25,6 +26,7 @@ Symbol = Annotated[
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
 NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 
 
 class BoundaryDTO(BaseModel):
@@ -212,6 +214,132 @@ class OHLCVBar(BoundaryDTO):
             msg = "high and low must bound open and close"
             raise ValueError(msg)
         return self
+
+
+class BarFrame(BoundaryDTO):
+    """Canonical per-symbol OHLCV frames and unadjusted corporate actions."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+
+    bars: dict[Symbol, pd.DataFrame]
+    dividends: dict[Symbol, pd.Series]
+    splits: dict[Symbol, pd.Series]
+
+    @model_validator(mode="after")
+    def validate_canonical_frames(self) -> BarFrame:
+        """Require canonical columns, UTC indexes, and aligned action series."""
+        expected_columns = ("open", "high", "low", "close", "adj_close", "volume")
+        symbols = set(self.bars)
+        if not symbols:
+            msg = "at least one symbol frame is required"
+            raise ValueError(msg)
+        if set(self.dividends) != symbols or set(self.splits) != symbols:
+            msg = "bar and corporate-action symbols must match"
+            raise ValueError(msg)
+        for symbol, frame in self.bars.items():
+            if not isinstance(frame.index, pd.DatetimeIndex) or str(frame.index.tz) != "UTC":
+                msg = f"{symbol} bar index must be a UTC DatetimeIndex"
+                raise ValueError(msg)
+            if tuple(frame.columns) != expected_columns:
+                msg = f"{symbol} columns must be {expected_columns}"
+                raise ValueError(msg)
+            for action_name, action in (
+                ("dividends", self.dividends[symbol]),
+                ("splits", self.splits[symbol]),
+            ):
+                if not isinstance(action.index, pd.DatetimeIndex) or str(action.index.tz) != "UTC":
+                    msg = f"{symbol} {action_name} index must be a UTC DatetimeIndex"
+                    raise ValueError(msg)
+                if not action.index.equals(frame.index):
+                    msg = f"{symbol} {action_name} index must align with bars"
+                    raise ValueError(msg)
+        return self
+
+
+class QualityReport(BoundaryDTO):
+    """Successful quality-gate measurements for one symbol."""
+
+    symbol: Symbol
+    rows: Annotated[int, Field(gt=0)]
+    nan_ratios: dict[NonEmptyText, Annotated[float, Field(ge=0, le=1)]]
+    max_abs_log_return: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    max_return_zscore: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    last_timestamp: AwareDatetime
+    passed: Literal[True] = True
+
+    @field_validator("last_timestamp")
+    @classmethod
+    def last_timestamp_must_be_utc(cls, value: datetime) -> datetime:
+        """Require a UTC quality-report boundary."""
+        if value.utcoffset() != timedelta(0):
+            msg = "last_timestamp must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+
+class LabeledSample(BoundaryDTO):
+    """One purge-friendly label with its overlap-aware training weight."""
+
+    label: Literal[-1, 0, 1]
+    t0: AwareDatetime
+    t1: AwareDatetime
+    ret: FiniteFloat
+    weight: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+    @field_validator("t0", "t1")
+    @classmethod
+    def label_timestamps_must_be_utc(cls, value: datetime) -> datetime:
+        """Require UTC event boundaries."""
+        if value.utcoffset() != timedelta(0):
+            msg = "label timestamps must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def touch_must_not_precede_event(self) -> LabeledSample:
+        """Reject impossible event intervals."""
+        if self.t1 < self.t0:
+            msg = "t1 must not precede t0"
+            raise ValueError(msg)
+        return self
+
+
+class DataIngested(Event):
+    """Fact emitted after canonical vendor data is validated."""
+
+    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
+    rows: dict[Symbol, Annotated[int, Field(gt=0)]]
+
+
+class QualityGateFailed(Event):
+    """Fact emitted immediately before bad market data is rejected."""
+
+    symbol: Symbol
+    reason: NonEmptyText
+
+
+class QualityReportProduced(Event):
+    """Fact emitted after a market-data frame passes every quality rule."""
+
+    report: QualityReport
+
+
+class FeaturesComputed(Event):
+    """Fact emitted after a causal feature matrix is produced."""
+
+    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
+    rows: Annotated[int, Field(gt=0)]
+
+
+class LabelsComputed(Event):
+    """Fact emitted after purge-friendly labels are produced."""
+
+    samples: Annotated[int, Field(gt=0)]
 
 
 class Position(BoundaryDTO):
