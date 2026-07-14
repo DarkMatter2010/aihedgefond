@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 
 from aihedgefund.core.bus import MessageBus
 from aihedgefund.core.config import QualitySettings
-from aihedgefund.core.schemas import QualityGateFailed, QualityReport, QualityReportProduced
+from aihedgefund.core.runtime import Clock, SystemClock
+from aihedgefund.core.schemas import (
+    QualityFailure,
+    QualityGateFailed,
+    QualityReport,
+    QualityReportProduced,
+)
 
 
 class DataQualityError(RuntimeError):
@@ -19,9 +25,16 @@ class DataQualityError(RuntimeError):
 class DataQualityGate:
     """Validate one canonical symbol frame and emit typed outcomes."""
 
-    def __init__(self, settings: QualitySettings, bus: MessageBus) -> None:
+    def __init__(
+        self,
+        settings: QualitySettings,
+        bus: MessageBus,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
         self._settings = settings
         self._bus = bus
+        self._clock = clock or SystemClock()
 
     def validate(
         self,
@@ -31,18 +44,24 @@ class DataQualityGate:
         now: datetime | None = None,
     ) -> QualityReport:
         """Return a report only when every configured check passes."""
-        checked_at = now or datetime.now(UTC)
+        checked_at = now or self._clock.now()
         try:
             report = self._validate(frame, symbol, checked_at)
         except DataQualityError as exc:
             self._bus.publish_event(
-                QualityGateFailed(timestamp=checked_at, symbol=symbol, reason=str(exc))
+                QualityGateFailed(
+                    timestamp=checked_at,
+                    payload=QualityFailure(symbol=symbol, reason=str(exc)),
+                )
             )
             raise
         except Exception as exc:
             failure = DataQualityError(f"{symbol} quality evaluation failed: {exc}")
             self._bus.publish_event(
-                QualityGateFailed(timestamp=checked_at, symbol=symbol, reason=str(failure))
+                QualityGateFailed(
+                    timestamp=checked_at,
+                    payload=QualityFailure(symbol=symbol, reason=str(failure)),
+                )
             )
             raise failure from exc
 

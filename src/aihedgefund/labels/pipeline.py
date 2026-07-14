@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, datetime
 from typing import Literal, cast
 
 import pandas as pd
 
 from aihedgefund.core.bus import MessageBus
 from aihedgefund.core.config import LabelSettings
-from aihedgefund.core.schemas import BarFrame, LabeledSample, LabelsComputed
+from aihedgefund.core.runtime import Clock, SystemClock
+from aihedgefund.core.schemas import (
+    BarFrame,
+    CorporateActionInput,
+    LabelBatch,
+    LabeledSample,
+    LabelsComputed,
+)
 from aihedgefund.data.corporate_actions import adjust_corporate_actions
 from aihedgefund.labels.labeling import (
     cusum_filter,
@@ -23,9 +29,16 @@ from aihedgefund.labels.labeling import (
 class LabelPipeline:
     """Create weighted, purge-friendly DTOs from configured barriers."""
 
-    def __init__(self, settings: LabelSettings, bus: MessageBus) -> None:
+    def __init__(
+        self,
+        settings: LabelSettings,
+        bus: MessageBus,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
         self._settings = settings
         self._bus = bus
+        self._clock = clock or SystemClock()
 
     def compute(
         self,
@@ -68,7 +81,7 @@ class LabelPipeline:
             for _, row in labels.iterrows()
         )
         self._bus.publish_event(
-            LabelsComputed(timestamp=datetime.now(UTC), samples=len(samples))
+            LabelsComputed(timestamp=self._clock.now(), payload=LabelBatch(samples=samples))
         )
         return samples
 
@@ -84,13 +97,15 @@ class LabelPipeline:
         if symbol not in bars.bars:
             msg = f"symbol {symbol!r} is not present in BarFrame"
             raise ValueError(msg)
-        adjusted = adjust_corporate_actions(
-            bars.bars[symbol]["close"],
-            bars.splits[symbol],
-            bars.dividends[symbol],
+        adjustment = adjust_corporate_actions(
+            CorporateActionInput(
+                raw_close=bars.bars[symbol]["close"],
+                splits=bars.splits[symbol],
+                dividends=bars.dividends[symbol],
+            )
         )
         return self.compute(
-            adjusted["total_return_adjusted"],
+            adjustment.as_of_adjusted,
             events,
             side=side,
         )

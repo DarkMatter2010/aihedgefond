@@ -186,6 +186,41 @@ class OHLCVRequest(BoundaryDTO):
         return self
 
 
+class MarketDataRequest(BoundaryDTO):
+    """Typed multi-symbol request at the Phase 1 ingest boundary."""
+
+    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
+    start: AwareDatetime
+    end: AwareDatetime
+    frequency: Literal["1d"]
+
+    @field_validator("symbols")
+    @classmethod
+    def symbols_must_be_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject ambiguous duplicate symbols."""
+        if len(value) != len(set(value)):
+            msg = "market-data symbols must be unique"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("start", "end")
+    @classmethod
+    def timestamps_must_be_utc(cls, value: datetime) -> datetime:
+        """Require UTC request boundaries."""
+        if value.utcoffset() != timedelta(0):
+            msg = "market-data request timestamps must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def end_must_follow_start(self) -> MarketDataRequest:
+        """Reject empty and reversed ingest windows."""
+        if self.end <= self.start:
+            msg = "market-data request end must be later than start"
+            raise ValueError(msg)
+        return self
+
+
 class OHLCVBar(BoundaryDTO):
     """Vendor-neutral market-data response item."""
 
@@ -261,6 +296,93 @@ class BarFrame(BoundaryDTO):
         return self
 
 
+class CorporateActionInput(BoundaryDTO):
+    """Aligned raw prices and action facts entering the pure CA transform."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+
+    raw_close: pd.Series
+    splits: pd.Series
+    dividends: pd.Series
+
+    @model_validator(mode="after")
+    def validate_series(self) -> CorporateActionInput:
+        """Require aligned, ordered, finite action inputs."""
+        if self.raw_close.empty:
+            msg = "raw_close must not be empty"
+            raise ValueError(msg)
+        if (
+            not self.raw_close.index.equals(self.splits.index)
+            or not self.raw_close.index.equals(self.dividends.index)
+        ):
+            msg = "close, splits, and dividends must have identical indexes"
+            raise ValueError(msg)
+        if not isinstance(self.raw_close.index, pd.DatetimeIndex):
+            msg = "corporate-action index must be a DatetimeIndex"
+            raise ValueError(msg)
+        if self.raw_close.index.has_duplicates or not self.raw_close.index.is_monotonic_increasing:
+            msg = "corporate-action index must be unique and increasing"
+            raise ValueError(msg)
+        try:
+            raw_close = self.raw_close.astype(float)
+            splits = self.splits.astype(float)
+            dividends = self.dividends.astype(float)
+        except (TypeError, ValueError) as exc:
+            msg = "corporate-action series must be numeric"
+            raise ValueError(msg) from exc
+        if raw_close.isna().any() or splits.isna().any() or dividends.isna().any():
+            msg = "corporate-action inputs must not contain NaNs"
+            raise ValueError(msg)
+        if (raw_close <= 0).any() or (splits < 0).any() or (dividends < 0).any():
+            msg = "prices must be positive and actions must be non-negative"
+            raise ValueError(msg)
+        return self
+
+
+class CorporateActionAdjustment(BoundaryDTO):
+    """Forward-adjusted price outputs whose row uses only known actions."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+
+    raw_close: pd.Series
+    split_adjusted: pd.Series
+    as_of_adjusted: pd.Series
+
+    @model_validator(mode="after")
+    def series_must_align(self) -> CorporateActionAdjustment:
+        """Require all output series to share the raw-close index."""
+        if (
+            not self.raw_close.index.equals(self.split_adjusted.index)
+            or not self.raw_close.index.equals(self.as_of_adjusted.index)
+        ):
+            msg = "corporate-action outputs must have identical indexes"
+            raise ValueError(msg)
+        return self
+
+
+class PointInTimeFrame(BoundaryDTO):
+    """Typed wrapper for mutable tables crossing the PIT module boundary."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+
+    frame: pd.DataFrame
+
+
 class QualityReport(BoundaryDTO):
     """Successful quality-gate measurements for one symbol."""
 
@@ -309,18 +431,76 @@ class LabeledSample(BoundaryDTO):
         return self
 
 
+class IngestedMarketData(BoundaryDTO):
+    """Typed payload emitted after an ingest request passes quality checks."""
+
+    request: MarketDataRequest
+    data: BarFrame
+
+
+class QualityFailure(BoundaryDTO):
+    """Typed payload describing a rejected symbol frame."""
+
+    symbol: Symbol
+    reason: NonEmptyText
+
+
+class FeatureMatrixPayload(BoundaryDTO):
+    """Typed metadata for the intentionally DataFrame-returning feature contract."""
+
+    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
+    rows: Annotated[int, Field(gt=0)]
+    columns: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
+    dtypes: Annotated[tuple[Literal["float64"], ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def columns_and_dtypes_must_align(self) -> FeatureMatrixPayload:
+        """Require one explicit dtype per feature column."""
+        if len(self.columns) != len(self.dtypes):
+            msg = "feature columns and dtypes must have equal lengths"
+            raise ValueError(msg)
+        return self
+
+
+class LabelBatch(BoundaryDTO):
+    """Typed payload containing the labels produced by one run."""
+
+    samples: Annotated[tuple[LabeledSample, ...], Field(min_length=1)]
+
+
 class DataIngested(Event):
     """Fact emitted after canonical vendor data is validated."""
 
-    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
-    rows: dict[Symbol, Annotated[int, Field(gt=0)]]
+    payload: IngestedMarketData
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """Expose requested symbols for Phase 1 compatibility."""
+        return self.payload.request.symbols
+
+    @property
+    def rows(self) -> dict[str, int]:
+        """Expose validated row counts for Phase 1 compatibility."""
+        return {
+            symbol: len(frame)
+            for symbol, frame in self.payload.data.bars.items()
+        }
 
 
 class QualityGateFailed(Event):
     """Fact emitted immediately before bad market data is rejected."""
 
-    symbol: Symbol
-    reason: NonEmptyText
+    payload: QualityFailure
+
+    @property
+    def symbol(self) -> str:
+        """Expose the rejected symbol for compatibility."""
+        return self.payload.symbol
+
+    @property
+    def reason(self) -> str:
+        """Expose the rejection reason for compatibility."""
+        return self.payload.reason
 
 
 class QualityReportProduced(Event):
@@ -332,14 +512,28 @@ class QualityReportProduced(Event):
 class FeaturesComputed(Event):
     """Fact emitted after a causal feature matrix is produced."""
 
-    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
-    rows: Annotated[int, Field(gt=0)]
+    payload: FeatureMatrixPayload
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """Expose computed symbols for compatibility."""
+        return self.payload.symbols
+
+    @property
+    def rows(self) -> int:
+        """Expose the feature row count for compatibility."""
+        return self.payload.rows
 
 
 class LabelsComputed(Event):
     """Fact emitted after purge-friendly labels are produced."""
 
-    samples: Annotated[int, Field(gt=0)]
+    payload: LabelBatch
+
+    @property
+    def samples(self) -> int:
+        """Expose the label count for compatibility."""
+        return len(self.payload.samples)
 
 
 class Position(BoundaryDTO):

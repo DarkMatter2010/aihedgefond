@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from typing import cast
 
 import pandas as pd
 import yfinance as yf
 
 from aihedgefund.core.bus import MessageBus
-from aihedgefund.core.schemas import BarFrame, DataIngested
+from aihedgefund.core.runtime import Clock, SystemClock
+from aihedgefund.core.schemas import (
+    BarFrame,
+    DataIngested,
+    IngestedMarketData,
+    MarketDataRequest,
+)
 from aihedgefund.data.provider import DataUnavailableError, MarketDataProvider
+from aihedgefund.data.quality import DataQualityGate
 
 CANONICAL_COLUMNS = ("open", "high", "low", "close", "adj_close", "volume")
 
@@ -19,29 +25,33 @@ CANONICAL_COLUMNS = ("open", "high", "low", "close", "adj_close", "volume")
 class YFinanceProvider(MarketDataProvider):
     """Download unadjusted Yahoo bars and normalize them into canonical frames."""
 
-    def __init__(self, symbol_aliases: Mapping[str, str], bus: MessageBus) -> None:
+    def __init__(
+        self,
+        symbol_aliases: Mapping[str, str],
+        bus: MessageBus,
+        quality_gate: DataQualityGate,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
         self._symbol_aliases = dict(symbol_aliases)
         self._bus = bus
+        self._quality_gate = quality_gate
+        self._clock = clock or SystemClock()
 
     def get_ohlcv(
         self,
-        symbols: tuple[str, ...],
-        start: datetime,
-        end: datetime,
-        frequency: str,
+        request: MarketDataRequest,
     ) -> BarFrame:
         """Fetch canonical UTC bars while preserving raw actions and both closes."""
-        if not symbols:
-            msg = "at least one symbol is required"
-            raise DataUnavailableError(msg)
+        symbols = request.symbols
         vendor_symbols = tuple(self._symbol_aliases.get(symbol, symbol) for symbol in symbols)
         raw = cast(
             pd.DataFrame,
             yf.download(
                 tickers=list(vendor_symbols),
-                start=start,
-                end=end,
-                interval=frequency,
+                start=request.start,
+                end=request.end,
+                interval=request.frequency,
                 auto_adjust=False,
                 actions=True,
                 group_by="ticker",
@@ -67,11 +77,12 @@ class YFinanceProvider(MarketDataProvider):
             splits[alias] = symbol_splits
 
         result = BarFrame(bars=bars, dividends=dividends, splits=splits)
+        for symbol, frame in result.bars.items():
+            self._quality_gate.validate(frame, symbol)
         self._bus.publish_event(
             DataIngested(
-                timestamp=datetime.now(UTC),
-                symbols=symbols,
-                rows={symbol: len(frame) for symbol, frame in bars.items()},
+                timestamp=self._clock.now(),
+                payload=IngestedMarketData(request=request, data=result),
             )
         )
         return result
@@ -119,8 +130,8 @@ class YFinanceProvider(MarketDataProvider):
         normalized.index = index
 
         canonical = normalized.loc[:, list(CANONICAL_COLUMNS)].astype(float)
-        if canonical.empty or canonical.isna().any(axis=None):
-            msg = f"{symbol} contains an unresolved data gap"
+        if canonical.empty:
+            msg = f"{symbol} contains no canonical rows"
             raise DataUnavailableError(msg)
 
         dividends = YFinanceProvider._action_series(normalized, "dividends", canonical.index)
@@ -136,5 +147,6 @@ class YFinanceProvider(MarketDataProvider):
         index: pd.DatetimeIndex,
     ) -> pd.Series:
         if column not in frame:
-            return pd.Series(0.0, index=index, dtype=float)
+            msg = f"yfinance response is missing required action column {column!r}"
+            raise DataUnavailableError(msg)
         return cast(pd.Series, frame[column]).astype(float).reindex(index, fill_value=0.0)

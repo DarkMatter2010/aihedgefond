@@ -3,26 +3,34 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Literal
 
 from aihedgefund.core.ports import DataVendorPort
-from aihedgefund.core.schemas import OHLCVBar, OHLCVRequest
+from aihedgefund.core.schemas import MarketDataRequest, OHLCVBar, OHLCVRequest
 from aihedgefund.data.provider import MarketDataProvider
 
 
 class Phase0DataVendorAdapter(DataVendorPort):
     """Preserve the original single-symbol port without changing its contract."""
 
-    def __init__(self, provider: MarketDataProvider, *, frequency: str = "1d") -> None:
+    def __init__(
+        self,
+        provider: MarketDataProvider,
+        *,
+        frequency: Literal["1d"] = "1d",
+    ) -> None:
         self._provider = provider
         self._frequency = frequency
 
     def get_ohlcv(self, request: OHLCVRequest) -> tuple[OHLCVBar, ...]:
         """Map canonical Phase 1 data back to the original raw-bar DTO."""
         result = self._provider.get_ohlcv(
-            (request.symbol,),
-            request.start,
-            request.end,
-            self._frequency,
+            MarketDataRequest(
+                symbols=(request.symbol,),
+                start=request.start,
+                end=request.end,
+                frequency=self._frequency,
+            )
         )
         frame = result.bars[request.symbol]
         return tuple(

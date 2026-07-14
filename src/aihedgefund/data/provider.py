@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
 
-from aihedgefund.core.schemas import BarFrame
+from aihedgefund.core.schemas import BarFrame, MarketDataRequest
 
 
 class DataUnavailableError(RuntimeError):
@@ -18,10 +17,7 @@ class MarketDataProvider(ABC):
     @abstractmethod
     def get_ohlcv(
         self,
-        symbols: tuple[str, ...],
-        start: datetime,
-        end: datetime,
-        frequency: str,
+        request: MarketDataRequest,
     ) -> BarFrame:
         """Return complete canonical bars and raw corporate actions."""
 
@@ -46,18 +42,15 @@ class ProviderChain(MarketDataProvider):
 
     def get_ohlcv(
         self,
-        symbols: tuple[str, ...],
-        start: datetime,
-        end: datetime,
-        frequency: str,
+        request: MarketDataRequest,
     ) -> BarFrame:
         """Return the first complete response, never a partial or NaN-filled frame."""
         failures: list[str] = []
         for provider in self._providers:
             for attempt in range(1, self._max_attempts + 1):
                 try:
-                    result = provider.get_ohlcv(symbols, start, end, frequency)
-                    self._assert_complete(result)
+                    result = provider.get_ohlcv(request)
+                    self._assert_complete(result, request)
                 except Exception as exc:  # noqa: BLE001 - adapters expose heterogeneous failures
                     failures.append(f"{type(provider).__name__} attempt {attempt}: {exc}")
                     continue
@@ -67,7 +60,14 @@ class ProviderChain(MarketDataProvider):
         raise DataUnavailableError(msg)
 
     @staticmethod
-    def _assert_complete(result: BarFrame) -> None:
+    def _assert_complete(result: BarFrame, request: MarketDataRequest) -> None:
+        returned_symbols = set(result.bars)
+        requested_symbols = set(request.symbols)
+        if returned_symbols != requested_symbols:
+            missing = sorted(requested_symbols - returned_symbols)
+            unexpected = sorted(returned_symbols - requested_symbols)
+            msg = f"provider symbol mismatch; missing={missing}, unexpected={unexpected}"
+            raise DataUnavailableError(msg)
         for symbol, frame in result.bars.items():
             if frame.empty or frame.isna().any(axis=None):
                 msg = f"{symbol} contains an unresolved data gap"
@@ -79,12 +79,9 @@ class SecondaryProviderStub(MarketDataProvider):
 
     def get_ohlcv(
         self,
-        symbols: tuple[str, ...],
-        start: datetime,
-        end: datetime,
-        frequency: str,
+        request: MarketDataRequest,
     ) -> BarFrame:
         """Hard-fail instead of pretending that fallback data exists."""
-        del symbols, start, end, frequency
+        del request
         msg = "secondary market-data provider is not configured"
         raise DataUnavailableError(msg)
