@@ -244,6 +244,147 @@ def test_ingest_rejects_missing_corporate_action_columns(
         provider.get_ohlcv(market_data_request(canonical))
 
 
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param("Stock Splits", np.nan, id="nan-split"),
+        pytest.param("Stock Splits", np.inf, id="infinite-split"),
+        pytest.param("Stock Splits", -1.0, id="non-positive-split-factor"),
+        pytest.param("Dividends", -0.01, id="negative-dividend"),
+    ],
+)
+def test_ingest_rejects_corrupt_corporate_actions_before_event(
+    monkeypatch: pytest.MonkeyPatch,
+    column: str,
+    value: float,
+) -> None:
+    canonical = synthetic_ohlcv(20)
+    source = yfinance_fixture(canonical)
+    source.loc[source.index[5], column] = value
+    monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
+    clock = FrozenClock(canonical.index[-1].to_pydatetime())
+    bus = InProcessMessageBus()
+    ingested: list[DataIngested] = []
+    failures: list[QualityGateFailed] = []
+    bus.subscribe_event(DataIngested, ingested.append)
+    bus.subscribe_event(QualityGateFailed, failures.append)
+    provider = YFinanceProvider(
+        {},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
+
+    with pytest.raises(DataQualityError):
+        provider.get_ohlcv(market_data_request(canonical))
+
+    assert ingested == []
+    assert [failure.symbol for failure in failures] == ["AAPL"]
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param("open", np.nan, id="nan-open"),
+        pytest.param("open", np.inf, id="infinite-open"),
+        pytest.param("open", -1.0, id="negative-open"),
+        pytest.param("high", np.nan, id="nan-high"),
+        pytest.param("high", np.inf, id="infinite-high"),
+        pytest.param("high", -1.0, id="negative-high"),
+        pytest.param("low", np.nan, id="nan-low"),
+        pytest.param("low", np.inf, id="infinite-low"),
+        pytest.param("low", -1.0, id="negative-low"),
+        pytest.param("close", np.nan, id="nan-close"),
+        pytest.param("close", np.inf, id="infinite-close"),
+        pytest.param("close", -1.0, id="negative-close"),
+        pytest.param("volume", np.nan, id="nan-volume"),
+        pytest.param("volume", np.inf, id="infinite-volume"),
+        pytest.param("volume", -1.0, id="negative-volume"),
+    ],
+)
+def test_ingest_rejects_invalid_ohlcv_values_before_event(
+    monkeypatch: pytest.MonkeyPatch,
+    column: str,
+    value: float,
+) -> None:
+    canonical = synthetic_ohlcv(20)
+    canonical.loc[canonical.index[5], column] = value
+    source = yfinance_fixture(canonical)
+    monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
+    clock = FrozenClock(canonical.index[-1].to_pydatetime())
+    bus = InProcessMessageBus()
+    ingested: list[DataIngested] = []
+    failures: list[QualityGateFailed] = []
+    bus.subscribe_event(DataIngested, ingested.append)
+    bus.subscribe_event(QualityGateFailed, failures.append)
+    provider = YFinanceProvider(
+        {},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
+
+    with pytest.raises(DataQualityError):
+        provider.get_ohlcv(market_data_request(canonical))
+
+    assert ingested == []
+    assert [failure.symbol for failure in failures] == ["AAPL"]
+
+
+def test_ingest_rejects_high_below_low_before_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = synthetic_ohlcv(20)
+    canonical.loc[canonical.index[5], "high"] = canonical.loc[canonical.index[5], "low"] - 1.0
+    source = yfinance_fixture(canonical)
+    monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
+    clock = FrozenClock(canonical.index[-1].to_pydatetime())
+    bus = InProcessMessageBus()
+    ingested: list[DataIngested] = []
+    failures: list[QualityGateFailed] = []
+    bus.subscribe_event(DataIngested, ingested.append)
+    bus.subscribe_event(QualityGateFailed, failures.append)
+    provider = YFinanceProvider(
+        {},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
+
+    with pytest.raises(DataQualityError, match="price bounds"):
+        provider.get_ohlcv(market_data_request(canonical))
+
+    assert ingested == []
+    assert [failure.symbol for failure in failures] == ["AAPL"]
+
+
+def test_ingest_publishes_event_for_valid_ohlcv_and_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = synthetic_ohlcv(20)
+    source = yfinance_fixture(canonical)
+    source.loc[source.index[5], "Stock Splits"] = 2.0
+    source.loc[source.index[10], "Dividends"] = 0.25
+    monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
+    clock = FrozenClock(canonical.index[-1].to_pydatetime())
+    bus = InProcessMessageBus()
+    ingested: list[DataIngested] = []
+    bus.subscribe_event(DataIngested, ingested.append)
+    provider = YFinanceProvider(
+        {},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
+
+    result = provider.get_ohlcv(market_data_request(canonical))
+
+    assert result.splits["AAPL"].loc[source.index[5]] == 2.0
+    assert result.dividends["AAPL"].loc[source.index[10]] == 0.25
+    assert len(ingested) == 1
+    assert ingested[0].payload.data == result
+
+
 def test_quality_gate_passes_clean_data_and_emits_report() -> None:
     frame = synthetic_ohlcv()
     bus = InProcessMessageBus()
@@ -288,6 +429,9 @@ def test_quality_gate_hard_fails_corrupted_data(corruption: str) -> None:
 def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
     frame = synthetic_ohlcv()
     frame.iloc[80, frame.columns.get_loc("close")] *= 1.2
+    frame.iloc[80, frame.columns.get_loc("high")] = (
+        frame.iloc[80]["close"] * 1.001
+    )
     strict_zscore = QualitySettings(
         max_nan_ratio=0.0,
         max_abs_logret=1.0,
