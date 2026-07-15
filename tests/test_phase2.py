@@ -76,8 +76,7 @@ poetry install
 poetry run ruff check .
 poetry run mypy src/
 poetry run pytest -q
-```
-"""
+```"""
 
 
 def test_readme_matches_mirror() -> None:
