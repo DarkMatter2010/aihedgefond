@@ -1,0 +1,20 @@
+name: Cursor Draft to Ready
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  ready:
+    if: |
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.user.login == 'cursor[bot]' &&
+      startsWith(github.event.pull_request.head.ref, 'cursor/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark PR as ready for review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr ready ${{ github.event.pull_request.number }} --repo ${{ github.repository }}
