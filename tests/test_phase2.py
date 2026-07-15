@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 README_MIRROR = """# AI Hedge Fund
 
 Phase 0 provides the vendor-neutral foundation for a Python 3.12, event-driven
