@@ -65,7 +65,7 @@ class Settings(ConfigModel):
     """Complete application settings, additively extended for Phase 1."""
 
     trading_limits: TradingLimits
-    artifact_root: Path = Path("artifacts")
+    artifact_root: Path
     universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
     feature_flags: dict[NonEmptyText, bool]
     start: date

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
@@ -14,6 +15,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StringConstraints,
     field_validator,
     model_validator,
@@ -161,6 +163,13 @@ class FeatureVector(Event):
         return value
 
 
+class ModelTrainingConfig(BoundaryDTO):
+    """Deterministic training inputs required for model reproduction."""
+
+    seed: Annotated[int, Field(ge=0)]
+    hyperparameters: dict[NonEmptyText, JsonValue]
+
+
 class ModelArtifactMetadata(BoundaryDTO):
     """Reproducibility metadata stored beside one native model artifact."""
 
@@ -169,7 +178,7 @@ class ModelArtifactMetadata(BoundaryDTO):
     created_at: AwareDatetime
     universe: tuple[Symbol, ...]
     features: tuple[NonEmptyText, ...]
-    hyperparameters: dict[NonEmptyText, object]
+    training_config: ModelTrainingConfig
     model_format: Literal["lightgbm_native"]
     model_file: NonEmptyText
     phase: Annotated[int, Field(ge=0)]
@@ -200,6 +209,41 @@ class ModelArtifactMetadata(BoundaryDTO):
             msg = "model_file must be a relative filename"
             raise ValueError(msg)
         return value
+
+
+class SaveModelArtifactRequest(BoundaryDTO):
+    """Vendor-neutral payload and metadata to persist."""
+
+    model_data: Annotated[bytes, Field(min_length=1)]
+    metadata: ModelArtifactMetadata
+
+
+class SaveModelArtifactResult(BoundaryDTO):
+    """Location created for one persisted model artifact."""
+
+    artifact_directory: Path
+
+
+class LoadModelArtifactRequest(BoundaryDTO):
+    """Identity of one model artifact to restore."""
+
+    model_hash: NonEmptyText
+
+    @field_validator("model_hash")
+    @classmethod
+    def model_hash_must_be_safe(cls, value: str) -> str:
+        """Require the hash lookup to remain within one path segment."""
+        if value in {".", ".."} or "/" in value or "\\" in value:
+            msg = "model_hash must be a single path segment"
+            raise ValueError(msg)
+        return value
+
+
+class LoadModelArtifactResult(BoundaryDTO):
+    """Vendor-neutral persisted model payload and validated metadata."""
+
+    model_data: Annotated[bytes, Field(min_length=1)]
+    metadata: ModelArtifactMetadata
 
 
 class OHLCVRequest(BoundaryDTO):

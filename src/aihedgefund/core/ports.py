@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from pathlib import Path
-
-import lightgbm as lgb
 
 from aihedgefund.core.schemas import (
     Fill,
-    ModelArtifactMetadata,
+    LoadModelArtifactRequest,
+    LoadModelArtifactResult,
     OHLCVBar,
     OHLCVRequest,
     Order,
     Position,
+    SaveModelArtifactRequest,
+    SaveModelArtifactResult,
 )
 
 
@@ -38,12 +38,12 @@ class BrokerPort(ABC):
 
 
 class ModelArtifactPort(ABC):
-    """Port for persisting and restoring native trained models."""
+    """Vendor-neutral port for persisting and restoring trained models."""
 
     @abstractmethod
-    def save_model(self, model: lgb.Booster, metadata: ModelArtifactMetadata) -> Path:
-        """Persist a model with its validated reproducibility metadata."""
+    def save_model(self, request: SaveModelArtifactRequest) -> SaveModelArtifactResult:
+        """Persist a validated model payload and metadata."""
 
     @abstractmethod
-    def load_model(self, model_hash: str) -> tuple[lgb.Booster, ModelArtifactMetadata]:
-        """Restore the uniquely identified model and validated metadata."""
+    def load_model(self, request: LoadModelArtifactRequest) -> LoadModelArtifactResult:
+        """Restore a uniquely identified validated model artifact."""

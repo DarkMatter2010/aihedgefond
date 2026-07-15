@@ -14,18 +14,22 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from aihedgefund.core.bus import InProcessMessageBus
-from aihedgefund.core.config import Settings, load_settings
+from aihedgefund.core.config import DEFAULT_CONFIG_PATH, Settings, load_settings
 from aihedgefund.core.ports import BrokerPort, DataVendorPort, ModelArtifactPort
 from aihedgefund.core.schemas import (
     Event,
     FeatureValue,
     FeatureVector,
     Fill,
+    LoadModelArtifactRequest,
+    LoadModelArtifactResult,
     ModelArtifactMetadata,
+    ModelTrainingConfig,
     Order,
     OrderSide,
     OrderType,
     RiskCheck,
+    SaveModelArtifactRequest,
     Signal,
 )
 from aihedgefund.research.adapters.filesystem import (
@@ -247,6 +251,18 @@ def test_config_loader_hard_fails_for_invalid_root(tmp_path: Path) -> None:
         load_settings(invalid_config)
 
 
+def test_config_loader_hard_fails_without_artifact_root(tmp_path: Path) -> None:
+    missing_artifact_root = tmp_path / "missing-artifact-root.yaml"
+    config_text = DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
+    missing_artifact_root.write_text(
+        config_text.replace("artifact_root: artifacts/\n\n", ""),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="artifact_root"):
+        load_settings(missing_artifact_root)
+
+
 @pytest.mark.parametrize("port", [DataVendorPort, BrokerPort, ModelArtifactPort])
 def test_ports_are_abstract(port: type[object]) -> None:
     with pytest.raises(TypeError):
@@ -254,12 +270,15 @@ def test_ports_are_abstract(port: type[object]) -> None:
 
 
 MODEL_FEATURES = ("feature_b", "feature_a")
-MODEL_HYPERPARAMETERS: dict[str, object] = {
+MODEL_HYPERPARAMETERS = {
     "learning_rate": 0.1,
     "num_leaves": 4,
-    "seed": 17,
     "verbosity": -1,
 }
+MODEL_TRAINING_CONFIG = ModelTrainingConfig(
+    seed=17,
+    hyperparameters=MODEL_HYPERPARAMETERS,
+)
 MODEL_SAMPLE = np.array([[0.15, 0.85], [0.75, 0.25]], dtype=np.float64)
 
 
@@ -299,7 +318,7 @@ def make_model_metadata(settings: Settings) -> ModelArtifactMetadata:
     """Create metadata whose hash is derived from the configured training inputs."""
     model_hash = compute_model_hash(
         features=MODEL_FEATURES,
-        hyperparameters=MODEL_HYPERPARAMETERS,
+        training_config=MODEL_TRAINING_CONFIG,
         universe=settings.universe,
         settings=settings,
     )
@@ -309,7 +328,7 @@ def make_model_metadata(settings: Settings) -> ModelArtifactMetadata:
         created_at=NOW,
         universe=settings.universe,
         features=MODEL_FEATURES,
-        hyperparameters=MODEL_HYPERPARAMETERS,
+        training_config=MODEL_TRAINING_CONFIG,
         model_format="lightgbm_native",
         model_file="model.txt",
         phase=0,
@@ -327,11 +346,12 @@ def test_model_artifact_metadata_contract_and_config_key() -> None:
         "created_at",
         "universe",
         "features",
-        "hyperparameters",
+        "training_config",
         "model_format",
         "model_file",
         "phase",
     )
+    assert metadata.training_config.seed == 17
     assert metadata.created_at.tzinfo is UTC
     with pytest.raises(ValidationError, match="created_at must use UTC"):
         ModelArtifactMetadata.model_validate(
@@ -349,40 +369,86 @@ def test_model_artifact_metadata_contract_and_config_key() -> None:
         )
 
 
-def test_model_hash_is_deterministic_across_order_and_calls() -> None:
-    settings = load_settings()
-    hashes = {
-        compute_model_hash(
-            features=features,
-            hyperparameters=hyperparameters,
-            universe=universe,
-            settings=settings,
-        )
-        for features, hyperparameters, universe in (
-            (MODEL_FEATURES, MODEL_HYPERPARAMETERS, settings.universe),
-            (
-                tuple(reversed(MODEL_FEATURES)),
-                dict(reversed(tuple(MODEL_HYPERPARAMETERS.items()))),
-                tuple(reversed(settings.universe)),
-            ),
-            (MODEL_FEATURES, MODEL_HYPERPARAMETERS, settings.universe),
-        )
-    }
+def test_model_artifact_boundary_rejects_wrong_metadata_type_and_missing_seed() -> None:
+    metadata = make_model_metadata(load_settings())
 
-    assert len(hashes) == 1
+    with pytest.raises(ValidationError):
+        SaveModelArtifactRequest(
+            model_data=b"native-model",
+            metadata="not-metadata",  # type: ignore[arg-type]
+        )
+
+    invalid_metadata = metadata.model_dump()
+    invalid_metadata["training_config"] = {
+        "hyperparameters": MODEL_HYPERPARAMETERS,
+    }
+    with pytest.raises(ValidationError, match="seed"):
+        ModelArtifactMetadata.model_validate(invalid_metadata)
+
+
+def test_model_hash_preserves_feature_order_but_canonicalizes_mappings() -> None:
+    settings = load_settings()
+    original_hash = compute_model_hash(
+        features=MODEL_FEATURES,
+        training_config=MODEL_TRAINING_CONFIG,
+        universe=settings.universe,
+        settings=settings,
+    )
+    reordered_mapping_hash = compute_model_hash(
+        features=MODEL_FEATURES,
+        training_config=ModelTrainingConfig(
+            seed=MODEL_TRAINING_CONFIG.seed,
+            hyperparameters=dict(reversed(tuple(MODEL_HYPERPARAMETERS.items()))),
+        ),
+        universe=tuple(reversed(settings.universe)),
+        settings=settings,
+    )
+    reordered_features_hash = compute_model_hash(
+        features=tuple(reversed(MODEL_FEATURES)),
+        training_config=MODEL_TRAINING_CONFIG,
+        universe=settings.universe,
+        settings=settings,
+    )
+
+    assert reordered_mapping_hash == original_hash
+    assert reordered_features_hash != original_hash
 
 
 def test_model_hash_changes_with_hyperparameter() -> None:
     settings = load_settings()
     original_hash = compute_model_hash(
         features=MODEL_FEATURES,
-        hyperparameters=MODEL_HYPERPARAMETERS,
+        training_config=MODEL_TRAINING_CONFIG,
         universe=settings.universe,
         settings=settings,
     )
     changed_hash = compute_model_hash(
         features=MODEL_FEATURES,
-        hyperparameters={**MODEL_HYPERPARAMETERS, "num_leaves": 8},
+        training_config=ModelTrainingConfig(
+            seed=MODEL_TRAINING_CONFIG.seed,
+            hyperparameters={**MODEL_HYPERPARAMETERS, "num_leaves": 8},
+        ),
+        universe=settings.universe,
+        settings=settings,
+    )
+
+    assert changed_hash != original_hash
+
+
+def test_model_hash_changes_with_seed() -> None:
+    settings = load_settings()
+    original_hash = compute_model_hash(
+        features=MODEL_FEATURES,
+        training_config=MODEL_TRAINING_CONFIG,
+        universe=settings.universe,
+        settings=settings,
+    )
+    changed_hash = compute_model_hash(
+        features=MODEL_FEATURES,
+        training_config=ModelTrainingConfig(
+            seed=18,
+            hyperparameters=MODEL_HYPERPARAMETERS,
+        ),
         universe=settings.universe,
         settings=settings,
     )
@@ -398,19 +464,41 @@ def test_lightgbm_artifact_round_trip_preserves_predictions(
     metadata = make_model_metadata(settings)
     adapter = FilesystemModelArtifactAdapter(tmp_path)
 
-    artifact_directory = adapter.save_model(dummy_lightgbm_model, metadata)
-    loaded_model, loaded_metadata = adapter.load_model(metadata.model_hash)
+    saved = adapter.save_lightgbm_model(dummy_lightgbm_model, metadata)
+    loaded = adapter.load_model(LoadModelArtifactRequest(model_hash=metadata.model_hash))
+    loaded_model = adapter.deserialize_lightgbm_model(loaded)
+    artifact_directory = saved.artifact_directory
 
     assert artifact_directory == (tmp_path / "models" / metadata.strategy_id / metadata.model_hash)
     assert (artifact_directory / "model.txt").is_file()
     assert (artifact_directory / "metadata.json").is_file()
-    assert loaded_metadata == metadata
+    assert isinstance(loaded, LoadModelArtifactResult)
+    assert loaded.metadata == metadata
     np.testing.assert_allclose(
         loaded_model.predict(MODEL_SAMPLE),
         dummy_lightgbm_model.predict(MODEL_SAMPLE),
         rtol=0,
         atol=0,
     )
+
+
+def test_model_save_hard_fails_instead_of_overwriting_existing_hash(
+    tmp_path: Path,
+    dummy_lightgbm_model: lgb.Booster,
+) -> None:
+    metadata = make_model_metadata(load_settings())
+    adapter = FilesystemModelArtifactAdapter(tmp_path)
+    artifact_directory = adapter.save_lightgbm_model(
+        dummy_lightgbm_model, metadata
+    ).artifact_directory
+    model_before = (artifact_directory / "model.txt").read_bytes()
+    metadata_before = (artifact_directory / "metadata.json").read_bytes()
+
+    with pytest.raises(FileExistsError):
+        adapter.save_lightgbm_model(dummy_lightgbm_model, metadata)
+
+    assert (artifact_directory / "model.txt").read_bytes() == model_before
+    assert (artifact_directory / "metadata.json").read_bytes() == metadata_before
 
 
 def test_model_save_hard_fails_for_missing_or_unwritable_root(
@@ -421,14 +509,16 @@ def test_model_save_hard_fails_for_missing_or_unwritable_root(
     missing_root = tmp_path / "missing"
 
     with pytest.raises(FileNotFoundError, match="artifact_root does not exist"):
-        FilesystemModelArtifactAdapter(missing_root).save_model(dummy_lightgbm_model, metadata)
+        FilesystemModelArtifactAdapter(missing_root).save_lightgbm_model(
+            dummy_lightgbm_model, metadata
+        )
 
     unwritable_root = tmp_path / "unwritable"
     unwritable_root.mkdir()
     unwritable_root.chmod(0o500)
     try:
         with pytest.raises(PermissionError, match="artifact_root is not writable"):
-            FilesystemModelArtifactAdapter(unwritable_root).save_model(
+            FilesystemModelArtifactAdapter(unwritable_root).save_lightgbm_model(
                 dummy_lightgbm_model, metadata
             )
     finally:
@@ -439,4 +529,4 @@ def test_model_load_hard_fails_for_unknown_hash(tmp_path: Path) -> None:
     adapter = FilesystemModelArtifactAdapter(tmp_path)
 
     with pytest.raises(FileNotFoundError, match="model hash not found"):
-        adapter.load_model("missing-model-hash")
+        adapter.load_model(LoadModelArtifactRequest(model_hash="missing-model-hash"))

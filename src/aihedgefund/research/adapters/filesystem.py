@@ -12,7 +12,14 @@ from pydantic import ValidationError
 
 from aihedgefund.core.config import Settings
 from aihedgefund.core.ports import ModelArtifactPort
-from aihedgefund.core.schemas import ModelArtifactMetadata
+from aihedgefund.core.schemas import (
+    LoadModelArtifactRequest,
+    LoadModelArtifactResult,
+    ModelArtifactMetadata,
+    ModelTrainingConfig,
+    SaveModelArtifactRequest,
+    SaveModelArtifactResult,
+)
 
 MODEL_FILENAME = "model.txt"
 METADATA_FILENAME = "metadata.json"
@@ -21,21 +28,30 @@ METADATA_FILENAME = "metadata.json"
 def compute_model_hash(
     *,
     features: tuple[str, ...],
-    hyperparameters: dict[str, object],
+    training_config: ModelTrainingConfig,
     universe: tuple[str, ...],
     settings: Settings,
 ) -> str:
     """Return SHA-256 of canonical training inputs in documented field order.
 
-    The canonical UTF-8 JSON sequence contains features (sorted), hyperparameters
-    (sorted by key), universe (sorted), then settings start, end, and frequency.
-    JSON object keys nested inside hyperparameter values are sorted recursively.
+    The canonical UTF-8 JSON sequence preserves semantically significant feature
+    order and includes the mandatory seed, sorted hyperparameters, sorted universe,
+    then settings start, end, and frequency. Nested JSON object keys are sorted.
     """
     canonical_inputs: list[object] = [
-        ["features", sorted(features)],
+        ["features", list(features)],
         [
-            "hyperparameters",
-            [[key, hyperparameters[key]] for key in sorted(hyperparameters)],
+            "training_config",
+            [
+                ["seed", training_config.seed],
+                [
+                    "hyperparameters",
+                    [
+                        [key, training_config.hyperparameters[key]]
+                        for key in sorted(training_config.hyperparameters)
+                    ],
+                ],
+            ],
         ],
         ["universe", sorted(universe)],
         ["start", settings.start.isoformat()],
@@ -62,9 +78,45 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
     def __init__(self, artifact_root: Path) -> None:
         self._artifact_root = artifact_root
 
-    def save_model(self, model: lgb.Booster, metadata: ModelArtifactMetadata) -> Path:
-        """Save ``model.txt`` and ``metadata.json`` without root fallback."""
+    def save_lightgbm_model(
+        self,
+        model: lgb.Booster,
+        metadata: ModelArtifactMetadata,
+    ) -> SaveModelArtifactResult:
+        """Translate a LightGBM booster to the vendor-neutral persistence DTO."""
+        if not isinstance(model, lgb.Booster):
+            msg = "model must be a lightgbm.Booster"
+            raise TypeError(msg)
+        if not isinstance(metadata, ModelArtifactMetadata):
+            msg = "metadata must be ModelArtifactMetadata"
+            raise TypeError(msg)
+        return self.save_model(
+            SaveModelArtifactRequest(
+                model_data=model.model_to_string().encode("utf-8"),
+                metadata=metadata,
+            )
+        )
+
+    @staticmethod
+    def deserialize_lightgbm_model(result: LoadModelArtifactResult) -> lgb.Booster:
+        """Translate one loaded vendor-neutral DTO back to LightGBM."""
+        if not isinstance(result, LoadModelArtifactResult):
+            msg = "result must be LoadModelArtifactResult"
+            raise TypeError(msg)
+        try:
+            model_text = result.model_data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            msg = "native LightGBM model data must be UTF-8"
+            raise ValueError(msg) from exc
+        return lgb.Booster(model_str=model_text)
+
+    def save_model(self, request: SaveModelArtifactRequest) -> SaveModelArtifactResult:
+        """Save ``model.txt`` and ``metadata.json`` without overwriting."""
+        if not isinstance(request, SaveModelArtifactRequest):
+            msg = "request must be SaveModelArtifactRequest"
+            raise TypeError(msg)
         self._require_writable_root()
+        metadata = request.metadata
         if metadata.model_file != MODEL_FILENAME:
             msg = f"model_file must be {MODEL_FILENAME!r}"
             raise ValueError(msg)
@@ -72,17 +124,21 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
         artifact_directory = (
             self._artifact_root / "models" / metadata.strategy_id / metadata.model_hash
         )
-        artifact_directory.mkdir(parents=True, exist_ok=True)
-        model.save_model(artifact_directory / MODEL_FILENAME)
+        artifact_directory.mkdir(parents=True, exist_ok=False)
+        (artifact_directory / MODEL_FILENAME).write_bytes(request.model_data)
         (artifact_directory / METADATA_FILENAME).write_text(
             f"{metadata.model_dump_json(indent=2)}\n",
             encoding="utf-8",
         )
-        return artifact_directory
+        return SaveModelArtifactResult(artifact_directory=artifact_directory)
 
-    def load_model(self, model_hash: str) -> tuple[lgb.Booster, ModelArtifactMetadata]:
+    def load_model(self, request: LoadModelArtifactRequest) -> LoadModelArtifactResult:
         """Load the single artifact matching ``model_hash`` or fail hard."""
+        if not isinstance(request, LoadModelArtifactRequest):
+            msg = "request must be LoadModelArtifactRequest"
+            raise TypeError(msg)
         self._require_existing_root()
+        model_hash = request.model_hash
         artifact_directory = self._find_artifact_directory(model_hash)
         metadata_path = artifact_directory / METADATA_FILENAME
         if not metadata_path.is_file():
@@ -111,7 +167,10 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
         if not model_path.is_file():
             msg = f"native model file not found for model hash {model_hash!r}"
             raise FileNotFoundError(msg)
-        return lgb.Booster(model_file=str(model_path)), metadata
+        return LoadModelArtifactResult(
+            model_data=model_path.read_bytes(),
+            metadata=metadata,
+        )
 
     def _require_existing_root(self) -> None:
         if not self._artifact_root.exists():
