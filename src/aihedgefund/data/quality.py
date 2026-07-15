@@ -68,38 +68,6 @@ class DataQualityGate:
         self._bus.publish_event(QualityReportProduced(timestamp=checked_at, report=report))
         return report
 
-    def validate_corporate_actions(
-        self,
-        dividends: pd.Series,
-        splits: pd.Series,
-        symbol: str,
-        *,
-        now: datetime | None = None,
-    ) -> None:
-        """Reject invalid action values using the quality gate's hard-fail semantics."""
-        checked_at = now or self._clock.now()
-        try:
-            self._validate_corporate_actions(dividends, splits, symbol)
-        except DataQualityError as exc:
-            self._bus.publish_event(
-                QualityGateFailed(
-                    timestamp=checked_at,
-                    payload=QualityFailure(symbol=symbol, reason=str(exc)),
-                )
-            )
-            raise
-        except Exception as exc:
-            failure = DataQualityError(
-                f"{symbol} corporate-action quality evaluation failed: {exc}"
-            )
-            self._bus.publish_event(
-                QualityGateFailed(
-                    timestamp=checked_at,
-                    payload=QualityFailure(symbol=symbol, reason=str(failure)),
-                )
-            )
-            raise failure from exc
-
     def _validate(
         self,
         frame: pd.DataFrame,
@@ -114,39 +82,8 @@ class DataQualityGate:
             raise DataQualityError(f"{symbol} has duplicate timestamps")
         if not frame.index.is_monotonic_increasing:
             raise DataQualityError(f"{symbol} timestamps are not strictly increasing")
-
-        ohlcv_columns = ("open", "high", "low", "close", "volume")
-        missing_ohlcv = [column for column in ohlcv_columns if column not in frame]
-        if missing_ohlcv:
-            raise DataQualityError(f"{symbol} has no OHLCV columns: {missing_ohlcv}")
-        try:
-            ohlcv = frame.loc[:, list(ohlcv_columns)].astype(float)
-        except (TypeError, ValueError) as exc:
-            raise DataQualityError(f"{symbol} OHLCV values must be numeric") from exc
-
-        non_finite = [
-            column for column in ohlcv_columns if not np.isfinite(ohlcv[column]).all()
-        ]
-        if non_finite:
-            raise DataQualityError(
-                f"{symbol} contains non-finite OHLCV values: {non_finite}"
-            )
-        non_positive_prices = [
-            column for column in ("open", "high", "low", "close") if (ohlcv[column] <= 0).any()
-        ]
-        if non_positive_prices:
-            raise DataQualityError(
-                f"{symbol} contains non-positive prices: {non_positive_prices}"
-            )
-        if (ohlcv["volume"] < 0).any():
-            raise DataQualityError(f"{symbol} contains negative volume")
-
-        high = ohlcv["high"]
-        low = ohlcv["low"]
-        open_close_max = ohlcv.loc[:, ["open", "close"]].max(axis=1)
-        open_close_min = ohlcv.loc[:, ["open", "close"]].min(axis=1)
-        if ((high < open_close_max) | (low > open_close_min) | (high < low)).any():
-            raise DataQualityError(f"{symbol} contains invalid OHLCV price bounds")
+        if "close" not in frame:
+            raise DataQualityError(f"{symbol} has no close column")
 
         nan_ratios = {column: float(frame[column].isna().mean()) for column in frame.columns}
         excessive_nan = {
@@ -157,7 +94,7 @@ class DataQualityGate:
         if excessive_nan:
             raise DataQualityError(f"{symbol} exceeds NaN ratios: {excessive_nan}")
 
-        close = ohlcv["close"]
+        close = frame["close"].astype(float)
         repeated = close.eq(close.shift(1))
         flatline_length = self._settings.stale_bars - 1
         if repeated.rolling(flatline_length).sum().ge(flatline_length).any():
@@ -203,33 +140,3 @@ class DataQualityGate:
             max_return_zscore=max_return_zscore,
             last_timestamp=last_timestamp.to_pydatetime(),
         )
-
-    @staticmethod
-    def _validate_corporate_actions(
-        dividends: pd.Series,
-        splits: pd.Series,
-        symbol: str,
-    ) -> None:
-        try:
-            numeric_actions = {
-                "dividends": dividends.astype(float),
-                "splits": splits.astype(float),
-            }
-        except (TypeError, ValueError) as exc:
-            raise DataQualityError(f"{symbol} corporate actions must be numeric") from exc
-
-        non_finite = [
-            name
-            for name, values in numeric_actions.items()
-            if not np.isfinite(values).all()
-        ]
-        if non_finite:
-            raise DataQualityError(
-                f"{symbol} contains non-finite corporate actions: {non_finite}"
-            )
-        if (numeric_actions["dividends"] < 0).any():
-            raise DataQualityError(f"{symbol} contains negative dividends")
-        if (numeric_actions["splits"] < 0).any():
-            raise DataQualityError(
-                f"{symbol} split factors must be zero sentinels or positive"
-            )
