@@ -161,6 +161,47 @@ class FeatureVector(Event):
         return value
 
 
+class ModelArtifactMetadata(BoundaryDTO):
+    """Reproducibility metadata stored beside one native model artifact."""
+
+    model_hash: NonEmptyText
+    strategy_id: NonEmptyText
+    created_at: AwareDatetime
+    universe: tuple[Symbol, ...]
+    features: tuple[NonEmptyText, ...]
+    hyperparameters: dict[NonEmptyText, object]
+    model_format: Literal["lightgbm_native"]
+    model_file: NonEmptyText
+    phase: Annotated[int, Field(ge=0)]
+
+    @field_validator("created_at")
+    @classmethod
+    def created_at_must_be_utc(cls, value: datetime) -> datetime:
+        """Reject non-UTC creation timestamps and normalize UTC values."""
+        if value.utcoffset() != timedelta(0):
+            msg = "created_at must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+    @field_validator("model_hash", "strategy_id")
+    @classmethod
+    def artifact_directory_names_must_be_safe(cls, value: str) -> str:
+        """Require metadata-derived directories to be single safe path segments."""
+        if value in {".", ".."} or "/" in value or "\\" in value:
+            msg = "artifact directory names must be single path segments"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("model_file")
+    @classmethod
+    def model_file_must_be_relative_filename(cls, value: str) -> str:
+        """Reject absolute, nested, and traversal model paths."""
+        if value in {".", ".."} or "/" in value or "\\" in value:
+            msg = "model_file must be a relative filename"
+            raise ValueError(msg)
+        return value
+
+
 class OHLCVRequest(BoundaryDTO):
     """Typed request for historical bars."""
 
@@ -316,9 +357,8 @@ class CorporateActionInput(BoundaryDTO):
         if self.raw_close.empty:
             msg = "raw_close must not be empty"
             raise ValueError(msg)
-        if (
-            not self.raw_close.index.equals(self.splits.index)
-            or not self.raw_close.index.equals(self.dividends.index)
+        if not self.raw_close.index.equals(self.splits.index) or not self.raw_close.index.equals(
+            self.dividends.index
         ):
             msg = "close, splits, and dividends must have identical indexes"
             raise ValueError(msg)
@@ -361,10 +401,9 @@ class CorporateActionAdjustment(BoundaryDTO):
     @model_validator(mode="after")
     def series_must_align(self) -> CorporateActionAdjustment:
         """Require all output series to share the raw-close index."""
-        if (
-            not self.raw_close.index.equals(self.split_adjusted.index)
-            or not self.raw_close.index.equals(self.as_of_adjusted.index)
-        ):
+        if not self.raw_close.index.equals(
+            self.split_adjusted.index
+        ) or not self.raw_close.index.equals(self.as_of_adjusted.index):
             msg = "corporate-action outputs must have identical indexes"
             raise ValueError(msg)
         return self
@@ -481,10 +520,7 @@ class DataIngested(Event):
     @property
     def rows(self) -> dict[str, int]:
         """Expose validated row counts for Phase 1 compatibility."""
-        return {
-            symbol: len(frame)
-            for symbol, frame in self.payload.data.bars.items()
-        }
+        return {symbol: len(frame) for symbol, frame in self.payload.data.bars.items()}
 
 
 class QualityGateFailed(Event):

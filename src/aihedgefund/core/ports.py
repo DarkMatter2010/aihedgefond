@@ -1,10 +1,20 @@
-"""Abstract vendor-facing ports for future adapters."""
+"""Abstract infrastructure ports implemented by concrete adapters."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
-from aihedgefund.core.schemas import Fill, OHLCVBar, OHLCVRequest, Order, Position
+import lightgbm as lgb
+
+from aihedgefund.core.schemas import (
+    Fill,
+    ModelArtifactMetadata,
+    OHLCVBar,
+    OHLCVRequest,
+    Order,
+    Position,
+)
 
 
 class DataVendorPort(ABC):
@@ -25,3 +35,15 @@ class BrokerPort(ABC):
     @abstractmethod
     def get_positions(self) -> tuple[Position, ...]:
         """Return current broker positions as immutable DTOs."""
+
+
+class ModelArtifactPort(ABC):
+    """Port for persisting and restoring native trained models."""
+
+    @abstractmethod
+    def save_model(self, model: lgb.Booster, metadata: ModelArtifactMetadata) -> Path:
+        """Persist a model with its validated reproducibility metadata."""
+
+    @abstractmethod
+    def load_model(self, model_hash: str) -> tuple[lgb.Booster, ModelArtifactMetadata]:
+        """Restore the uniquely identified model and validated metadata."""

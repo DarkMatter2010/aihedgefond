@@ -4,6 +4,8 @@ trading_limits:
   max_turnover: 0.20
   max_daily_drawdown: 0.05
 
+artifact_root: artifacts/
+
 universe:
   - AAPL
   - MSFT

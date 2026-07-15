@@ -65,6 +65,7 @@ class Settings(ConfigModel):
     """Complete application settings, additively extended for Phase 1."""
 
     trading_limits: TradingLimits
+    artifact_root: Path = Path("artifacts")
     universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
     feature_flags: dict[NonEmptyText, bool]
     start: date
@@ -74,6 +75,17 @@ class Settings(ConfigModel):
     quality: QualitySettings
     labels: LabelSettings
     fracdiff: FracDiffSettings
+
+    @field_validator("artifact_root", mode="before")
+    @classmethod
+    def parse_artifact_root(cls, value: object) -> object:
+        """Convert YAML path strings while preserving strict model validation."""
+        if isinstance(value, str):
+            if not value.strip():
+                msg = "artifact_root must not be empty"
+                raise ValueError(msg)
+            return Path(value)
+        return value
 
     @field_validator("universe", mode="before")
     @classmethod
