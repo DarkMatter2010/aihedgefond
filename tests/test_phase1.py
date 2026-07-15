@@ -198,6 +198,9 @@ def test_ingest_quality_gate_blocks_bad_frames_before_features(
         canonical.iloc[20, canonical.columns.get_loc("close")] = np.nan
     elif corruption == "outlier":
         canonical.iloc[30, canonical.columns.get_loc("close")] *= 10.0
+        canonical.iloc[30, canonical.columns.get_loc("high")] = (
+            canonical.iloc[30]["close"] * 1.001
+        )
     source = yfinance_fixture(canonical)
     monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
 
@@ -217,10 +220,12 @@ def test_ingest_quality_gate_blocks_bad_frames_before_features(
         clock=clock,
     )
 
-    with pytest.raises(DataQualityError):
+    with pytest.raises(DataQualityError) as exc_info:
         bars = provider.get_ohlcv(market_data_request(canonical))
         FeaturePipeline(bus, clock=clock).compute(bars)
 
+    if corruption == "outlier":
+        assert "absolute log return" in str(exc_info.value)
     assert ingested == []
     assert features == []
 
@@ -412,6 +417,7 @@ def test_quality_gate_hard_fails_corrupted_data(corruption: str) -> None:
         frame.iloc[30:35, frame.columns.get_loc("close")] = frame.iloc[29]["close"]
     elif corruption == "outlier":
         frame.iloc[60, frame.columns.get_loc("close")] *= 10.0
+        frame.iloc[60, frame.columns.get_loc("high")] = frame.iloc[60]["close"] * 1.001
     else:
         order = [1, 0, *range(2, len(frame))]
         frame = frame.iloc[order]
@@ -421,9 +427,12 @@ def test_quality_gate_hard_fails_corrupted_data(corruption: str) -> None:
     bus.subscribe_event(QualityGateFailed, failures.append)
     gate = DataQualityGate(load_settings().quality, bus)
 
-    with pytest.raises(DataQualityError):
+    with pytest.raises(DataQualityError) as exc_info:
         gate.validate(frame, "AAPL", now=frame.index.max().to_pydatetime())
     assert len(failures) == 1
+    if corruption == "outlier":
+        assert "absolute log return" in str(exc_info.value)
+        assert "absolute log return" in failures[0].payload.reason
 
 
 def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
