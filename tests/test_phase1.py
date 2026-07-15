@@ -194,10 +194,29 @@ def test_ingest_quality_gate_blocks_bad_frames_before_features(
     corruption: str,
 ) -> None:
     canonical = synthetic_ohlcv(60)
+    quality_settings = load_settings().quality
+    expected_outlier_reason: str | None = None
     if corruption == "nan_ratio":
         canonical.iloc[20, canonical.columns.get_loc("close")] = np.nan
     elif corruption == "outlier":
         canonical.iloc[30, canonical.columns.get_loc("close")] *= 10.0
+        canonical.iloc[30, canonical.columns.get_loc("high")] = (
+            max(canonical.iloc[30]["open"], canonical.iloc[30]["close"]) * 1.001
+        )
+        assert canonical["high"].ge(canonical[["open", "close"]].max(axis=1)).all()
+        assert canonical["low"].le(canonical[["open", "close"]].min(axis=1)).all()
+        assert canonical["high"].ge(canonical["low"]).all()
+        max_abs_log_return = float(
+            np.log(canonical["close"] / canonical["close"].shift(1))
+            .dropna()
+            .abs()
+            .max()
+        )
+        assert quality_settings.max_abs_logret == 0.30
+        assert max_abs_log_return > quality_settings.max_abs_logret
+        expected_outlier_reason = (
+            f"AAPL absolute log return {max_abs_log_return:.6f} exceeds cap"
+        )
     source = yfinance_fixture(canonical)
     monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
 
@@ -208,21 +227,27 @@ def test_ingest_quality_gate_blocks_bad_frames_before_features(
     bus = InProcessMessageBus()
     ingested: list[DataIngested] = []
     features: list[FeaturesComputed] = []
+    failures: list[QualityGateFailed] = []
     bus.subscribe_event(DataIngested, ingested.append)
     bus.subscribe_event(FeaturesComputed, features.append)
+    bus.subscribe_event(QualityGateFailed, failures.append)
     provider = YFinanceProvider(
         {},
         bus,
-        DataQualityGate(load_settings().quality, bus, clock=clock),
+        DataQualityGate(quality_settings, bus, clock=clock),
         clock=clock,
     )
 
-    with pytest.raises(DataQualityError):
+    with pytest.raises(DataQualityError) as exc_info:
         bars = provider.get_ohlcv(market_data_request(canonical))
         FeaturePipeline(bus, clock=clock).compute(bars)
 
     assert ingested == []
     assert features == []
+    assert len(failures) == 1
+    if expected_outlier_reason is not None:
+        assert str(exc_info.value) == expected_outlier_reason
+        assert failures[0].payload.reason == expected_outlier_reason
 
 
 def test_ingest_rejects_missing_corporate_action_columns(
@@ -265,12 +290,28 @@ def test_quality_gate_passes_clean_data_and_emits_report() -> None:
 @pytest.mark.parametrize("corruption", ["nan", "flat", "outlier", "non_monotonic"])
 def test_quality_gate_hard_fails_corrupted_data(corruption: str) -> None:
     frame = synthetic_ohlcv()
+    quality_settings = load_settings().quality
+    expected_outlier_reason: str | None = None
     if corruption == "nan":
         frame.iloc[20, frame.columns.get_loc("close")] = np.nan
     elif corruption == "flat":
         frame.iloc[30:35, frame.columns.get_loc("close")] = frame.iloc[29]["close"]
     elif corruption == "outlier":
         frame.iloc[60, frame.columns.get_loc("close")] *= 10.0
+        frame.iloc[60, frame.columns.get_loc("high")] = (
+            max(frame.iloc[60]["open"], frame.iloc[60]["close"]) * 1.001
+        )
+        assert frame["high"].ge(frame[["open", "close"]].max(axis=1)).all()
+        assert frame["low"].le(frame[["open", "close"]].min(axis=1)).all()
+        assert frame["high"].ge(frame["low"]).all()
+        max_abs_log_return = float(
+            np.log(frame["close"] / frame["close"].shift(1)).dropna().abs().max()
+        )
+        assert quality_settings.max_abs_logret == 0.30
+        assert max_abs_log_return > quality_settings.max_abs_logret
+        expected_outlier_reason = (
+            f"AAPL absolute log return {max_abs_log_return:.6f} exceeds cap"
+        )
     else:
         order = [1, 0, *range(2, len(frame))]
         frame = frame.iloc[order]
@@ -278,11 +319,14 @@ def test_quality_gate_hard_fails_corrupted_data(corruption: str) -> None:
     bus = InProcessMessageBus()
     failures: list[QualityGateFailed] = []
     bus.subscribe_event(QualityGateFailed, failures.append)
-    gate = DataQualityGate(load_settings().quality, bus)
+    gate = DataQualityGate(quality_settings, bus)
 
-    with pytest.raises(DataQualityError):
+    with pytest.raises(DataQualityError) as exc_info:
         gate.validate(frame, "AAPL", now=frame.index.max().to_pydatetime())
     assert len(failures) == 1
+    if expected_outlier_reason is not None:
+        assert str(exc_info.value) == expected_outlier_reason
+        assert failures[0].payload.reason == expected_outlier_reason
 
 
 def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
