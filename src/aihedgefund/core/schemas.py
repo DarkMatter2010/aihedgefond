@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -28,6 +28,7 @@ Symbol = Annotated[
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
 NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+Sha256Hex = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 
 
@@ -167,13 +168,27 @@ class ModelTrainingConfig(BoundaryDTO):
     """Deterministic training inputs required for model reproduction."""
 
     seed: Annotated[int, Field(ge=0)]
+    num_boost_round: Annotated[int, Field(ge=1)]
     hyperparameters: dict[NonEmptyText, JsonValue]
+
+    @field_validator("hyperparameters")
+    @classmethod
+    def hyperparameters_must_not_duplicate_explicit_inputs(
+        cls, value: dict[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """Keep seed and iteration count single-sourced in their typed fields."""
+        reserved = {"seed", "num_boost_round", "num_iterations"}
+        duplicated = sorted(reserved.intersection(value))
+        if duplicated:
+            msg = f"hyperparameters duplicate explicit training inputs: {duplicated}"
+            raise ValueError(msg)
+        return value
 
 
 class ModelArtifactMetadata(BoundaryDTO):
     """Reproducibility metadata stored beside one native model artifact."""
 
-    model_hash: NonEmptyText
+    model_hash: Sha256Hex
     strategy_id: NonEmptyText
     created_at: AwareDatetime
     universe: tuple[Symbol, ...]
@@ -192,7 +207,7 @@ class ModelArtifactMetadata(BoundaryDTO):
             raise ValueError(msg)
         return value.astimezone(UTC)
 
-    @field_validator("model_hash", "strategy_id")
+    @field_validator("strategy_id")
     @classmethod
     def artifact_directory_names_must_be_safe(cls, value: str) -> str:
         """Require metadata-derived directories to be single safe path segments."""
@@ -216,6 +231,17 @@ class SaveModelArtifactRequest(BoundaryDTO):
 
     model_data: Annotated[bytes, Field(min_length=1)]
     metadata: ModelArtifactMetadata
+    start: date
+    end: date
+    frequency: Literal["1d"]
+
+    @model_validator(mode="after")
+    def end_must_follow_start(self) -> SaveModelArtifactRequest:
+        """Reject a hash window that cannot represent a training interval."""
+        if self.end <= self.start:
+            msg = "end must be later than start"
+            raise ValueError(msg)
+        return self
 
 
 class SaveModelArtifactResult(BoundaryDTO):
@@ -227,16 +253,7 @@ class SaveModelArtifactResult(BoundaryDTO):
 class LoadModelArtifactRequest(BoundaryDTO):
     """Identity of one model artifact to restore."""
 
-    model_hash: NonEmptyText
-
-    @field_validator("model_hash")
-    @classmethod
-    def model_hash_must_be_safe(cls, value: str) -> str:
-        """Require the hash lookup to remain within one path segment."""
-        if value in {".", ".."} or "/" in value or "\\" in value:
-            msg = "model_hash must be a single path segment"
-            raise ValueError(msg)
-        return value
+    model_hash: Sha256Hex
 
 
 class LoadModelArtifactResult(BoundaryDTO):

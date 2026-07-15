@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import date
 from pathlib import Path
 
 import lightgbm as lgb
@@ -38,12 +39,32 @@ def compute_model_hash(
     order and includes the mandatory seed, sorted hyperparameters, sorted universe,
     then settings start, end, and frequency. Nested JSON object keys are sorted.
     """
+    return _compute_model_hash(
+        features=features,
+        training_config=training_config,
+        universe=universe,
+        start=settings.start,
+        end=settings.end,
+        frequency=settings.frequency,
+    )
+
+
+def _compute_model_hash(
+    *,
+    features: tuple[str, ...],
+    training_config: ModelTrainingConfig,
+    universe: tuple[str, ...],
+    start: date,
+    end: date,
+    frequency: str,
+) -> str:
     canonical_inputs: list[object] = [
         ["features", list(features)],
         [
             "training_config",
             [
                 ["seed", training_config.seed],
+                ["num_boost_round", training_config.num_boost_round],
                 [
                     "hyperparameters",
                     [
@@ -54,9 +75,9 @@ def compute_model_hash(
             ],
         ],
         ["universe", sorted(universe)],
-        ["start", settings.start.isoformat()],
-        ["end", settings.end.isoformat()],
-        ["frequency", settings.frequency],
+        ["start", start.isoformat()],
+        ["end", end.isoformat()],
+        ["frequency", frequency],
     ]
     try:
         canonical_json = json.dumps(
@@ -82,6 +103,7 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
         self,
         model: lgb.Booster,
         metadata: ModelArtifactMetadata,
+        settings: Settings,
     ) -> SaveModelArtifactResult:
         """Translate a LightGBM booster to the vendor-neutral persistence DTO."""
         if not isinstance(model, lgb.Booster):
@@ -90,10 +112,17 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
         if not isinstance(metadata, ModelArtifactMetadata):
             msg = "metadata must be ModelArtifactMetadata"
             raise TypeError(msg)
+        if not isinstance(settings, Settings):
+            msg = "settings must be Settings"
+            raise TypeError(msg)
+        self._validate_model_matches_metadata(model, metadata)
         return self.save_model(
             SaveModelArtifactRequest(
                 model_data=model.model_to_string().encode("utf-8"),
                 metadata=metadata,
+                start=settings.start,
+                end=settings.end,
+                frequency=settings.frequency,
             )
         )
 
@@ -119,6 +148,17 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
         metadata = request.metadata
         if metadata.model_file != MODEL_FILENAME:
             msg = f"model_file must be {MODEL_FILENAME!r}"
+            raise ValueError(msg)
+        expected_hash = _compute_model_hash(
+            features=metadata.features,
+            training_config=metadata.training_config,
+            universe=metadata.universe,
+            start=request.start,
+            end=request.end,
+            frequency=request.frequency,
+        )
+        if metadata.model_hash != expected_hash:
+            msg = "model_hash does not match the supplied training inputs"
             raise ValueError(msg)
 
         artifact_directory = (
@@ -171,6 +211,33 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
             model_data=model_path.read_bytes(),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _validate_model_matches_metadata(
+        model: lgb.Booster, metadata: ModelArtifactMetadata
+    ) -> None:
+        model_features = tuple(model.feature_name())
+        if model_features != metadata.features:
+            msg = "LightGBM feature names and order do not match metadata"
+            raise ValueError(msg)
+
+        training_config = metadata.training_config
+        if model.current_iteration() != training_config.num_boost_round:
+            msg = "LightGBM iteration count does not match num_boost_round"
+            raise ValueError(msg)
+
+        actual_parameters = dict(model.params)
+        serialized_iterations = actual_parameters.pop("num_iterations", None)
+        if serialized_iterations is not None and (
+            serialized_iterations != training_config.num_boost_round
+        ):
+            msg = "LightGBM num_iterations does not match num_boost_round"
+            raise ValueError(msg)
+        expected_parameters = dict(training_config.hyperparameters)
+        expected_parameters["seed"] = training_config.seed
+        if actual_parameters != expected_parameters:
+            msg = "LightGBM parameters do not match metadata training_config"
+            raise ValueError(msg)
 
     def _require_existing_root(self) -> None:
         if not self._artifact_root.exists():
