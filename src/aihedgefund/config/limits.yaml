@@ -39,3 +39,20 @@ fracdiff:
   thresh: 0.0001
 
 artifact_root: artifacts/
+
+research:
+  horizon: 5
+  embargo_days: 5
+  seed: 42
+  train_end: 2022-12-30
+  test_start: 2023-01-09
+  strategy_id: phase2-lgbm-baseline
+  num_boost_round: 100
+  learning_rate: 0.05
+  num_leaves: 31
+  min_data_in_leaf: 20
+  feature_fraction: 0.8
+  bagging_fraction: 0.8
+  bagging_freq: 1
+  ic_positive_threshold: 0.02
+  min_cs_breadth_for_reliable_ic: 30

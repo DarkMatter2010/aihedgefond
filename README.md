@@ -65,6 +65,15 @@ explicit live smoke test only, run the non-pytest script:
 poetry run python scripts/manual_yfinance_check.py
 ```
 
+## Phase 2: research baseline
+
+Phase 2 trains a deterministic LightGBM **regressor** on Phase-1 technical
+features with a dense leak-free h-day forward-return label
+(`as_of_adjusted[t+h]/as_of_adjusted[t]-1`). Triple-barrier labels are not used
+as the training target. A fixed calendar train/test split with embargo ≥ h
+produces OOS IC / Rank-IC / ICIR diagnostics. The fitted booster is stored via
+the Phase-0 filesystem artifact adapter plus a `phase2_sidecar.json`.
+
 ## Development
 
 Install the exact locked dependencies and run the same checks as CI:
