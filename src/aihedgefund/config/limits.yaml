@@ -92,7 +92,7 @@ research:
   embargo_days: 5
   seed: 42
   train_end: 2022-12-30
-  test_start: 2023-01-09
+  test_start: 2023-01-10
   strategy_id: phase2-lgbm-baseline
   num_boost_round: 100
   learning_rate: 0.05
