@@ -602,3 +602,146 @@ class ModelArtifactLoadResult(BoundaryDTO):
 
     model_blob: bytes
     metadata: ModelArtifactMetadata
+
+
+class ForwardReturnLabelMeta(BoundaryDTO):
+    """Typed metadata for dense leak-free forward-return labels."""
+
+    horizon: Annotated[int, Field(ge=1)]
+    rows: Annotated[int, Field(ge=0)]
+    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
+    close_adj_source: Literal["as_of_adjusted"]
+
+
+class BaselineDataset(BoundaryDTO):
+    """Aligned Phase-1 features and dense forward-return labels."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+
+    features: pd.DataFrame
+    label: pd.Series
+    horizon: Annotated[int, Field(ge=1)]
+    feature_columns: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def features_and_label_must_align(self) -> BaselineDataset:
+        """Require identical MultiIndex rows and finite float64 feature columns."""
+        if not isinstance(self.features.index, pd.MultiIndex):
+            msg = "baseline features must use a MultiIndex"
+            raise ValueError(msg)
+        if list(self.features.index.names) != ["timestamp", "symbol"]:
+            msg = "baseline features index names must be ('timestamp', 'symbol')"
+            raise ValueError(msg)
+        if tuple(self.features.columns) != self.feature_columns:
+            msg = "baseline feature columns must match feature_columns metadata"
+            raise ValueError(msg)
+        if not self.label.index.equals(self.features.index):
+            msg = "baseline label index must equal features index"
+            raise ValueError(msg)
+        if self.features.isna().any().any() or self.label.isna().any():
+            msg = "baseline dataset must not contain NaNs"
+            raise ValueError(msg)
+        return self
+
+
+class SplitDefinition(BoundaryDTO):
+    """Fixed calendar train/test split with embargo semantics."""
+
+    train_end: date
+    test_start: date
+    embargo_days: Annotated[int, Field(ge=1)]
+    horizon: Annotated[int, Field(ge=1)]
+    train_rows: Annotated[int, Field(ge=0)]
+    test_rows: Annotated[int, Field(ge=0)]
+    train_max_timestamp: AwareDatetime | None = None
+    test_min_timestamp: AwareDatetime | None = None
+
+    @field_validator("train_max_timestamp", "test_min_timestamp")
+    @classmethod
+    def split_timestamps_must_be_utc(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        """Require UTC split boundaries when present."""
+        if value is None:
+            return None
+        if value.utcoffset() != timedelta(0):
+            msg = "split timestamps must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+
+class PredictionOutput(BoundaryDTO):
+    """Model scores aligned to a MultiIndex feature frame."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        strict=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+    )
+
+    scores: pd.Series
+    model_hash: Annotated[
+        str,
+        StringConstraints(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+    ]
+
+    @model_validator(mode="after")
+    def scores_must_be_finite(self) -> PredictionOutput:
+        """Reject empty or non-finite prediction series."""
+        if self.scores.empty:
+            msg = "prediction scores must not be empty"
+            raise ValueError(msg)
+        if self.scores.isna().any():
+            msg = "prediction scores must not contain NaNs"
+            raise ValueError(msg)
+        return self
+
+
+class ICMetricsReport(BoundaryDTO):
+    """Cross-sectional IC diagnostics for one OOS prediction set."""
+
+    ic_mean: FiniteFloat
+    rank_ic_mean: FiniteFloat
+    icir: FiniteFloat | None
+    rank_icir: FiniteFloat | None
+    median_cs_breadth: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    cs_breadth_warning: bool
+    ic_materially_positive: bool
+    ic_positive_threshold: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    n_dates: Annotated[int, Field(ge=0)]
+    warnings: tuple[NonEmptyText, ...] = ()
+
+
+class Phase2Sidecar(BoundaryDTO):
+    """JSON sidecar persisted beside the native LightGBM artifact."""
+
+    model_hash: Annotated[
+        str,
+        StringConstraints(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+    ]
+    git_commit: NonEmptyText
+    universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
+    feature_list: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
+    hyperparams: dict[NonEmptyText, object]
+    horizon: Annotated[int, Field(ge=1)]
+    split_def: SplitDefinition
+    data_range: dict[NonEmptyText, NonEmptyText]
+    lib_versions: dict[NonEmptyText, NonEmptyText]
+    seed: Annotated[int, Field(ge=0)]
+    metrics: ICMetricsReport
+    strategy_id: NonEmptyText
+    phase: Literal[2] = 2
+
+    @field_validator("universe", "feature_list", mode="before")
+    @classmethod
+    def freeze_sidecar_sequences(cls, value: object) -> object:
+        """Convert list payloads to immutable tuples at the boundary."""
+        if isinstance(value, list):
+            return tuple(value)
+        return value

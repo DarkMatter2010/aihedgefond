@@ -61,8 +61,46 @@ class FracDiffSettings(ConfigModel):
     thresh: Annotated[float, Field(gt=0, lt=1)]
 
 
+class ResearchSettings(ConfigModel):
+    """Phase-2 baseline research parameters (fixed splits, no proportional cuts)."""
+
+    horizon: Annotated[int, Field(ge=1)]
+    embargo_days: Annotated[int, Field(ge=1)]
+    seed: Annotated[int, Field(ge=0)]
+    train_end: date
+    test_start: date
+    strategy_id: NonEmptyText
+    num_boost_round: Annotated[int, Field(ge=1)]
+    learning_rate: Annotated[float, Field(gt=0, lt=1)]
+    num_leaves: Annotated[int, Field(ge=2)]
+    min_data_in_leaf: Annotated[int, Field(ge=1)]
+    feature_fraction: Annotated[float, Field(gt=0, le=1)]
+    bagging_fraction: Annotated[float, Field(gt=0, le=1)]
+    bagging_freq: Annotated[int, Field(ge=0)]
+    ic_positive_threshold: Annotated[float, Field(gt=0)]
+    min_cs_breadth_for_reliable_ic: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def validate_split_and_embargo(self) -> ResearchSettings:
+        """Require embargo ≥ horizon and a non-overlapping calendar split."""
+        if self.embargo_days < self.horizon:
+            msg = "research.embargo_days must be >= research.horizon"
+            raise ValueError(msg)
+        if self.test_start <= self.train_end:
+            msg = "research.test_start must be later than research.train_end"
+            raise ValueError(msg)
+        calendar_gap = (self.test_start - self.train_end).days
+        if calendar_gap < self.embargo_days:
+            msg = (
+                "research calendar gap (test_start - train_end) must be "
+                f">= embargo_days ({self.embargo_days}); got {calendar_gap}"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class Settings(ConfigModel):
-    """Complete application settings, additively extended for Phase 1."""
+    """Complete application settings, additively extended for Phase 1+2."""
 
     trading_limits: TradingLimits
     universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
@@ -75,6 +113,7 @@ class Settings(ConfigModel):
     labels: LabelSettings
     fracdiff: FracDiffSettings
     artifact_root: Path
+    research: ResearchSettings
 
     @field_validator("universe", mode="before")
     @classmethod
@@ -97,6 +136,9 @@ class Settings(ConfigModel):
         """Reject empty or reversed market-data windows."""
         if self.end <= self.start:
             msg = "end must be later than start"
+            raise ValueError(msg)
+        if self.research.train_end < self.start or self.research.test_start > self.end:
+            msg = "research split dates must lie within settings.start/end"
             raise ValueError(msg)
         return self
 
