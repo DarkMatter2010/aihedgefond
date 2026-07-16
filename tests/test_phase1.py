@@ -20,6 +20,7 @@ from aihedgefund.core.schemas import (
     BarFrame,
     CorporateActionInput,
     DataIngested,
+    ExtremeReturnFlagged,
     FeaturesComputed,
     LabelsComputed,
     MarketDataRequest,
@@ -188,7 +189,7 @@ def test_yfinance_fixture_is_canonical_utc_and_validated(
     assert validated_bar.symbol == "APPLE"
 
 
-@pytest.mark.parametrize("corruption", ["stale", "nan_ratio", "outlier"])
+@pytest.mark.parametrize("corruption", ["stale", "nan_ratio", "ohlc_geometry"])
 def test_ingest_quality_gate_blocks_bad_frames_before_features(
     monkeypatch: pytest.MonkeyPatch,
     corruption: str,
@@ -196,8 +197,10 @@ def test_ingest_quality_gate_blocks_bad_frames_before_features(
     canonical = synthetic_ohlcv(60)
     if corruption == "nan_ratio":
         canonical.iloc[20, canonical.columns.get_loc("close")] = np.nan
-    elif corruption == "outlier":
-        canonical.iloc[30, canonical.columns.get_loc("close")] *= 10.0
+    elif corruption == "ohlc_geometry":
+        canonical.iloc[30, canonical.columns.get_loc("high")] = (
+            canonical.iloc[30]["low"] - 1.0
+        )
     source = yfinance_fixture(canonical)
     monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
 
@@ -262,15 +265,15 @@ def test_quality_gate_passes_clean_data_and_emits_report() -> None:
     assert reports[0].report == report
 
 
-@pytest.mark.parametrize("corruption", ["nan", "flat", "outlier", "non_monotonic"])
+@pytest.mark.parametrize("corruption", ["nan", "flat", "ohlc_geometry", "non_monotonic"])
 def test_quality_gate_hard_fails_corrupted_data(corruption: str) -> None:
     frame = synthetic_ohlcv()
     if corruption == "nan":
         frame.iloc[20, frame.columns.get_loc("close")] = np.nan
     elif corruption == "flat":
         frame.iloc[30:35, frame.columns.get_loc("close")] = frame.iloc[29]["close"]
-    elif corruption == "outlier":
-        frame.iloc[60, frame.columns.get_loc("close")] *= 10.0
+    elif corruption == "ohlc_geometry":
+        frame.iloc[60, frame.columns.get_loc("low")] = frame.iloc[60]["high"] + 1.0
     else:
         order = [1, 0, *range(2, len(frame))]
         frame = frame.iloc[order]
@@ -285,9 +288,21 @@ def test_quality_gate_hard_fails_corrupted_data(corruption: str) -> None:
     assert len(failures) == 1
 
 
-def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
+def test_quality_gate_enforces_zscore_soft_flag_and_last_bar_age() -> None:
     frame = synthetic_ohlcv()
-    frame.iloc[80, frame.columns.get_loc("close")] *= 1.2
+    # Keep OHLC geometry valid while injecting a statistically extreme move.
+    crash_idx = 80
+    frame.iloc[crash_idx, frame.columns.get_loc("close")] *= 1.2
+    frame.iloc[crash_idx, frame.columns.get_loc("high")] = max(
+        frame.iloc[crash_idx]["high"],
+        frame.iloc[crash_idx]["close"],
+        frame.iloc[crash_idx]["open"],
+    )
+    frame.iloc[crash_idx, frame.columns.get_loc("low")] = min(
+        frame.iloc[crash_idx]["low"],
+        frame.iloc[crash_idx]["close"],
+        frame.iloc[crash_idx]["open"],
+    )
     strict_zscore = QualitySettings(
         max_nan_ratio=0.0,
         max_abs_logret=1.0,
@@ -295,12 +310,17 @@ def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
         zscore_cap=3.0,
         max_last_bar_age_days=7,
     )
-    with pytest.raises(DataQualityError, match="z-score"):
-        DataQualityGate(strict_zscore, InProcessMessageBus()).validate(
-            frame,
-            "AAPL",
-            now=frame.index[-1].to_pydatetime(),
-        )
+    bus = InProcessMessageBus()
+    flags: list[ExtremeReturnFlagged] = []
+    bus.subscribe_event(ExtremeReturnFlagged, flags.append)
+    report = DataQualityGate(strict_zscore, bus).validate(
+        frame,
+        "AAPL",
+        now=frame.index[-1].to_pydatetime(),
+    )
+    assert report.passed is True
+    assert report.max_return_zscore > strict_zscore.zscore_cap
+    assert len(flags) >= 1
     with pytest.raises(DataQualityError, match="stale"):
         DataQualityGate(load_settings().quality, InProcessMessageBus()).validate(
             synthetic_ohlcv(),
@@ -309,10 +329,9 @@ def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
         )
 
 
-def test_quality_gate_hard_fails_msft_covid_crash_zscore() -> None:
-    """Historical MSFT 2020-03-16 (|z|≈9.47 > cap 8.0) must hard-fail ingestion."""
+def _historical_close_frame(fixture_name: str) -> pd.DataFrame:
     close = pd.read_csv(
-        Path(__file__).resolve().parent / "fixtures" / "msft_close_2015_2026.csv",
+        Path(__file__).resolve().parent / "fixtures" / fixture_name,
         index_col=0,
         parse_dates=True,
     )["close"].astype(float)
@@ -320,7 +339,7 @@ def test_quality_gate_hard_fails_msft_covid_crash_zscore() -> None:
         close.index = close.index.tz_localize("UTC")
     else:
         close.index = close.index.tz_convert("UTC")
-    frame = pd.DataFrame(
+    return pd.DataFrame(
         {
             "open": close,
             "high": close,
@@ -331,17 +350,108 @@ def test_quality_gate_hard_fails_msft_covid_crash_zscore() -> None:
         },
         index=close.index,
     )
+
+
+def test_quality_gate_soft_flags_msft_covid_crash_without_hard_fail() -> None:
+    """Historical MSFT 2020-03-16 crash must soft-flag, not abort ingestion."""
+    frame = _historical_close_frame("msft_close_2015_2026.csv")
     bus = InProcessMessageBus()
+    flags: list[ExtremeReturnFlagged] = []
     failures: list[QualityGateFailed] = []
+    bus.subscribe_event(ExtremeReturnFlagged, flags.append)
     bus.subscribe_event(QualityGateFailed, failures.append)
-    with pytest.raises(DataQualityError, match=r"MSFT return z-score 9\.468662 exceeds cap"):
-        DataQualityGate(load_settings().quality, bus).validate(
-            frame,
-            "MSFT",
-            now=frame.index[-1].to_pydatetime(),
-        )
-    assert len(failures) == 1
-    assert "z-score" in failures[0].payload.reason
+    settings = load_settings().quality
+    report = DataQualityGate(settings, bus).validate(
+        frame,
+        "MSFT",
+        now=frame.index[-1].to_pydatetime(),
+    )
+
+    assert report.passed is True
+    assert failures == []
+    assert len(flags) >= 1
+    covid = next(
+        flag.payload
+        for flag in flags
+        if flag.payload.bar_timestamp.date().isoformat() == "2020-03-16"
+    )
+    assert covid.symbol == "MSFT"
+    assert covid.log_return == pytest.approx(-0.159453, abs=1e-6)
+    assert covid.z_score == pytest.approx(9.468662, abs=1e-6)
+    assert covid.z_score > settings.zscore_cap
+
+
+def test_quality_gate_soft_flags_meta_earnings_gap_without_hard_fail() -> None:
+    """Historical META 2022-02-03 earnings gap must soft-flag, not hard-fail."""
+    frame = _historical_close_frame("meta_close_2015_2026.csv")
+    bus = InProcessMessageBus()
+    flags: list[ExtremeReturnFlagged] = []
+    failures: list[QualityGateFailed] = []
+    bus.subscribe_event(ExtremeReturnFlagged, flags.append)
+    bus.subscribe_event(QualityGateFailed, failures.append)
+    settings = load_settings().quality
+    report = DataQualityGate(settings, bus).validate(
+        frame,
+        "META",
+        now=frame.index[-1].to_pydatetime(),
+    )
+
+    assert report.passed is True
+    assert failures == []
+    assert len(flags) >= 1
+    gap = next(
+        flag.payload
+        for flag in flags
+        if flag.payload.bar_timestamp.date().isoformat() == "2022-02-03"
+    )
+    assert gap.symbol == "META"
+    assert gap.log_return == pytest.approx(-0.306391, abs=1e-5)
+    assert abs(gap.log_return) > settings.max_abs_logret
+
+
+def test_extreme_return_flag_keeps_bar_in_feature_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Soft-flagged extremes must not silently drop the bar from features."""
+    canonical = synthetic_ohlcv(120)
+    crash_idx = 60
+    # Magnitude breach of max_abs_logret with valid OHLC geometry.
+    crash_close = canonical.iloc[crash_idx - 1]["close"] * np.exp(-0.35)
+    canonical.iloc[crash_idx, canonical.columns.get_loc("close")] = crash_close
+    canonical.iloc[crash_idx, canonical.columns.get_loc("open")] = crash_close
+    canonical.iloc[crash_idx, canonical.columns.get_loc("high")] = crash_close * 1.001
+    canonical.iloc[crash_idx, canonical.columns.get_loc("low")] = crash_close * 0.999
+    canonical.iloc[crash_idx, canonical.columns.get_loc("adj_close")] = crash_close
+    crash_ts = canonical.index[crash_idx]
+
+    source = yfinance_fixture(canonical)
+    monkeypatch.setattr(yfinance_adapter.yf, "download", lambda **_: source)
+    clock = FrozenClock(canonical.index[-1].to_pydatetime())
+    bus = InProcessMessageBus()
+    flags: list[ExtremeReturnFlagged] = []
+    ingested: list[DataIngested] = []
+    features: list[FeaturesComputed] = []
+    bus.subscribe_event(ExtremeReturnFlagged, flags.append)
+    bus.subscribe_event(DataIngested, ingested.append)
+    bus.subscribe_event(FeaturesComputed, features.append)
+    provider = YFinanceProvider(
+        {},
+        bus,
+        DataQualityGate(load_settings().quality, bus, clock=clock),
+        clock=clock,
+    )
+
+    bars = provider.get_ohlcv(market_data_request(canonical))
+    matrix = FeaturePipeline(bus, clock=clock).compute(bars)
+
+    assert len(flags) >= 1
+    assert any(
+        abs(flag.payload.log_return) > load_settings().quality.max_abs_logret for flag in flags
+    )
+    assert ingested and features
+    assert crash_ts in bars.bars["AAPL"].index
+    feature_timestamps = matrix.index.get_level_values("timestamp")
+    assert crash_ts in feature_timestamps
 
 
 def test_corporate_action_adjustment_handles_split_and_dividend_exactly() -> None:

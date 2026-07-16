@@ -445,6 +445,24 @@ class QualityFailure(BoundaryDTO):
     reason: NonEmptyText
 
 
+class ExtremeReturnFlag(BoundaryDTO):
+    """One statistically or magnitude-extreme but physically plausible log-return."""
+
+    symbol: Symbol
+    bar_timestamp: AwareDatetime
+    log_return: FiniteFloat
+    z_score: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+
+    @field_validator("bar_timestamp")
+    @classmethod
+    def bar_timestamp_must_be_utc(cls, value: datetime) -> datetime:
+        """Require a UTC bar timestamp for extreme-return flags."""
+        if value.utcoffset() != timedelta(0):
+            msg = "bar_timestamp must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+
 class FeatureMatrixPayload(BoundaryDTO):
     """Typed metadata for the intentionally DataFrame-returning feature contract."""
 
@@ -503,8 +521,19 @@ class QualityGateFailed(Event):
         return self.payload.reason
 
 
+class ExtremeReturnFlagged(Event):
+    """Soft flag for a real crash-scale return that stays in the sample."""
+
+    payload: ExtremeReturnFlag
+
+    @property
+    def symbol(self) -> str:
+        """Expose the flagged symbol for subscribers."""
+        return self.payload.symbol
+
+
 class QualityReportProduced(Event):
-    """Fact emitted after a market-data frame passes every quality rule."""
+    """Fact emitted after a market-data frame passes every hard-fail quality rule."""
 
     report: QualityReport
 
