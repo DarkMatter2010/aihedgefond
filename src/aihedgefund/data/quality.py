@@ -11,6 +11,8 @@ from aihedgefund.core.bus import MessageBus
 from aihedgefund.core.config import QualitySettings
 from aihedgefund.core.runtime import Clock, SystemClock
 from aihedgefund.core.schemas import (
+    ExtremeReturnFlag,
+    ExtremeReturnFlagged,
     QualityFailure,
     QualityGateFailed,
     QualityReport,
@@ -43,7 +45,11 @@ class DataQualityGate:
         *,
         now: datetime | None = None,
     ) -> QualityReport:
-        """Return a report when every hard-fail check passes."""
+        """Return a report when every hard-fail check passes.
+
+        Extreme returns (z-score / max abs log-return) soft-flag on the bus
+        and remain in the sample.
+        """
         checked_at = now or self._clock.now()
         try:
             report = self._validate(frame, symbol, checked_at)
@@ -94,6 +100,8 @@ class DataQualityGate:
         if excessive_nan:
             raise DataQualityError(f"{symbol} exceeds NaN ratios: {excessive_nan}")
 
+        self._validate_ohlc_geometry(frame, symbol)
+
         close = frame["close"].astype(float)
         repeated = close.eq(close.shift(1))
         flatline_length = self._settings.stale_bars - 1
@@ -116,21 +124,38 @@ class DataQualityGate:
 
         log_returns = np.log(close / close.shift(1)).dropna()
         max_abs_log_return = float(log_returns.abs().max()) if not log_returns.empty else 0.0
-        if max_abs_log_return > self._settings.max_abs_logret:
-            raise DataQualityError(
-                f"{symbol} absolute log return {max_abs_log_return:.6f} exceeds cap"
-            )
 
         return_std = float(log_returns.std(ddof=0)) if not log_returns.empty else 0.0
         if return_std == 0.0:
             max_return_zscore = 0.0
+            abs_zscores = pd.Series(0.0, index=log_returns.index, dtype=float)
         else:
-            zscores = ((log_returns - log_returns.mean()) / return_std).abs()
-            max_return_zscore = float(zscores.max())
-        if max_return_zscore > self._settings.zscore_cap:
-            raise DataQualityError(
-                f"{symbol} return z-score {max_return_zscore:.6f} exceeds cap"
+            abs_zscores = ((log_returns - log_returns.mean()) / return_std).abs()
+            max_return_zscore = float(abs_zscores.max())
+
+        # Real crash/gap days are soft-flagged: a fixed z or abs-return cap cannot
+        # distinguish corrupt data from genuine market moves (MSFT/META cases).
+        if not log_returns.empty:
+            extreme_mask = (log_returns.abs() > self._settings.max_abs_logret) | (
+                abs_zscores > self._settings.zscore_cap
             )
+            for bar_ts in log_returns.index[extreme_mask]:
+                bar_timestamp = pd.Timestamp(bar_ts)
+                if bar_timestamp.tzinfo is None:
+                    bar_timestamp = bar_timestamp.tz_localize("UTC")
+                else:
+                    bar_timestamp = bar_timestamp.tz_convert("UTC")
+                self._bus.publish_event(
+                    ExtremeReturnFlagged(
+                        timestamp=checked_at,
+                        payload=ExtremeReturnFlag(
+                            symbol=symbol,
+                            bar_timestamp=bar_timestamp.to_pydatetime(),
+                            log_return=float(log_returns.loc[bar_ts]),
+                            z_score=float(abs_zscores.loc[bar_ts]),
+                        ),
+                    )
+                )
 
         return QualityReport(
             symbol=symbol,
@@ -140,3 +165,21 @@ class DataQualityGate:
             max_return_zscore=max_return_zscore,
             last_timestamp=last_timestamp.to_pydatetime(),
         )
+
+    @staticmethod
+    def _validate_ohlc_geometry(frame: pd.DataFrame, symbol: str) -> None:
+        """Hard-fail impossible OHLC relationships (data corruption, not market moves)."""
+        required = ("open", "high", "low", "close")
+        missing = [column for column in required if column not in frame.columns]
+        if missing:
+            raise DataQualityError(f"{symbol} missing required OHLC columns: {missing}")
+
+        high = frame["high"].astype(float)
+        low = frame["low"].astype(float)
+        open_ = frame["open"].astype(float)
+        close = frame["close"].astype(float)
+        if (high < low).any():
+            raise DataQualityError(f"{symbol} has High < Low")
+        outside = (close > high) | (close < low) | (open_ > high) | (open_ < low)
+        if outside.any():
+            raise DataQualityError(f"{symbol} has Open/Close outside High/Low")
