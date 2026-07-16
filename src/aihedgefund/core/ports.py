@@ -3,8 +3,18 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 
-from aihedgefund.core.schemas import Fill, OHLCVBar, OHLCVRequest, Order, Position
+from lightgbm import Booster
+
+from aihedgefund.core.schemas import (
+    Fill,
+    ModelArtifactMetadata,
+    OHLCVBar,
+    OHLCVRequest,
+    Order,
+    Position,
+)
 
 
 class DataVendorPort(ABC):
@@ -25,3 +35,15 @@ class BrokerPort(ABC):
     @abstractmethod
     def get_positions(self) -> tuple[Position, ...]:
         """Return current broker positions as immutable DTOs."""
+
+
+class ModelArtifactPort(ABC):
+    """Port implemented by trained-model persistence adapters."""
+
+    @abstractmethod
+    def save(self, model: Booster, metadata: ModelArtifactMetadata) -> Path:
+        """Persist a trained model and its metadata; return the artifact directory."""
+
+    @abstractmethod
+    def load(self, model_hash: str) -> tuple[Booster, ModelArtifactMetadata]:
+        """Load a model and metadata by hash; raise if the artifact is missing."""

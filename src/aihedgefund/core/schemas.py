@@ -542,3 +542,34 @@ class Position(BoundaryDTO):
     symbol: Symbol
     quantity: Decimal
     average_price: NonNegativeDecimal
+
+
+class ModelArtifactMetadata(BoundaryDTO):
+    """Versioned metadata persisted beside a trained model artifact."""
+
+    model_hash: NonEmptyText
+    strategy_id: NonEmptyText
+    created_at: AwareDatetime
+    universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
+    features: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
+    hyperparameters: dict[NonEmptyText, object]
+    model_format: Literal["lightgbm_native"]
+    model_file: NonEmptyText
+    phase: Annotated[int, Field(ge=0)]
+
+    @field_validator("created_at")
+    @classmethod
+    def created_at_must_be_utc(cls, value: datetime) -> datetime:
+        """Require UTC artifact timestamps."""
+        if value.utcoffset() != timedelta(0):
+            msg = "created_at must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+    @field_validator("universe", "features", mode="before")
+    @classmethod
+    def freeze_sequence(cls, value: object) -> object:
+        """Convert list payloads to immutable tuples at the boundary."""
+        if isinstance(value, list):
+            return tuple(value)
+        return value

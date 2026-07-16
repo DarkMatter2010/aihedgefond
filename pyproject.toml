@@ -16,6 +16,7 @@ pandas = "3.0.3"
 numpy = "2.5.1"
 scipy = "1.18.0"
 statsmodels = "0.14.6"
+lightgbm = "4.6.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "9.1.1"
@@ -39,7 +40,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pandas", "pandas.*", "statsmodels.*", "yaml", "yfinance"]
+module = ["pandas", "pandas.*", "statsmodels.*", "yaml", "yfinance", "lightgbm", "lightgbm.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
