@@ -20,6 +20,7 @@ from aihedgefund.core.schemas import (
     BarFrame,
     CorporateActionInput,
     DataIngested,
+    ExtremeReturnFlagged,
     FeaturesComputed,
     LabelsComputed,
     MarketDataRequest,
@@ -295,18 +296,69 @@ def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
         zscore_cap=3.0,
         max_last_bar_age_days=7,
     )
-    with pytest.raises(DataQualityError, match="z-score"):
-        DataQualityGate(strict_zscore, InProcessMessageBus()).validate(
-            frame,
-            "AAPL",
-            now=frame.index[-1].to_pydatetime(),
-        )
+    bus = InProcessMessageBus()
+    flags: list[ExtremeReturnFlagged] = []
+    bus.subscribe_event(ExtremeReturnFlagged, flags.append)
+    report = DataQualityGate(strict_zscore, bus).validate(
+        frame,
+        "AAPL",
+        now=frame.index[-1].to_pydatetime(),
+    )
+    assert report.passed is True
+    assert report.max_return_zscore > strict_zscore.zscore_cap
+    assert len(flags) >= 1
     with pytest.raises(DataQualityError, match="stale"):
         DataQualityGate(load_settings().quality, InProcessMessageBus()).validate(
             synthetic_ohlcv(),
             "AAPL",
             now=(synthetic_ohlcv().index[-1] + pd.Timedelta(days=8)).to_pydatetime(),
         )
+
+
+def test_quality_gate_soft_flags_msft_covid_crash_without_hard_fail() -> None:
+    """Historical MSFT 2020-03-16 crash must soft-flag, not abort ingestion."""
+    close = pd.read_csv(
+        Path(__file__).resolve().parent / "fixtures" / "msft_close_2015_2026.csv",
+        index_col=0,
+        parse_dates=True,
+    )["close"].astype(float)
+    if close.index.tz is None:
+        close.index = close.index.tz_localize("UTC")
+    else:
+        close.index = close.index.tz_convert("UTC")
+    frame = pd.DataFrame(
+        {
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "adj_close": close,
+            "volume": 1_000_000.0,
+        },
+        index=close.index,
+    )
+    bus = InProcessMessageBus()
+    flags: list[ExtremeReturnFlagged] = []
+    failures: list[QualityGateFailed] = []
+    bus.subscribe_event(ExtremeReturnFlagged, flags.append)
+    bus.subscribe_event(QualityGateFailed, failures.append)
+    settings = load_settings().quality
+    report = DataQualityGate(settings, bus).validate(
+        frame,
+        "MSFT",
+        now=frame.index[-1].to_pydatetime(),
+    )
+
+    assert report.passed is True
+    assert failures == []
+    assert len(flags) == 1
+    flag = flags[0].payload
+    assert flag.symbol == "MSFT"
+    assert flag.bar_timestamp.date().isoformat() == "2020-03-16"
+    assert flag.log_return == pytest.approx(-0.159453, abs=1e-6)
+    assert flag.z_score == pytest.approx(9.468662, abs=1e-6)
+    assert flag.z_score > settings.zscore_cap
+    assert abs(flag.log_return) < settings.max_abs_logret
 
 
 def test_corporate_action_adjustment_handles_split_and_dividend_exactly() -> None:
