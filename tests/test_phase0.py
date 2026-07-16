@@ -238,7 +238,12 @@ def test_config_loader_exposes_typed_trading_limit() -> None:
 
     assert isinstance(settings, Settings)
     assert configured_max_position(settings) == 100000.0
-    assert settings.universe == ("AAPL", "MSFT", "SPY")
+    assert len(settings.universe) == 50
+    assert "SPY" not in settings.universe
+    assert settings.universe[0] == "AAPL"
+    assert settings.universe[1] == "MSFT"
+    assert "AMZN" in settings.universe
+    assert "ORCL" in settings.universe
     assert settings.feature_flags["audit_logging"] is True
 
 
