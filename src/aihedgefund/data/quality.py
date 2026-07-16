@@ -1,4 +1,4 @@
-"""Configured hard-fail checks for canonical market data."""
+"""Configured quality checks for canonical market data."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class DataQualityGate:
         *,
         now: datetime | None = None,
     ) -> QualityReport:
-        """Return a report only when every configured check passes."""
+        """Return a report when every hard-fail check passes."""
         checked_at = now or self._clock.now()
         try:
             report = self._validate(frame, symbol, checked_at)

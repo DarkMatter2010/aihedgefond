@@ -309,6 +309,41 @@ def test_quality_gate_enforces_zscore_and_last_bar_age() -> None:
         )
 
 
+def test_quality_gate_hard_fails_msft_covid_crash_zscore() -> None:
+    """Historical MSFT 2020-03-16 (|z|≈9.47 > cap 8.0) must hard-fail ingestion."""
+    close = pd.read_csv(
+        Path(__file__).resolve().parent / "fixtures" / "msft_close_2015_2026.csv",
+        index_col=0,
+        parse_dates=True,
+    )["close"].astype(float)
+    if close.index.tz is None:
+        close.index = close.index.tz_localize("UTC")
+    else:
+        close.index = close.index.tz_convert("UTC")
+    frame = pd.DataFrame(
+        {
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "adj_close": close,
+            "volume": 1_000_000.0,
+        },
+        index=close.index,
+    )
+    bus = InProcessMessageBus()
+    failures: list[QualityGateFailed] = []
+    bus.subscribe_event(QualityGateFailed, failures.append)
+    with pytest.raises(DataQualityError, match=r"MSFT return z-score 9\.468662 exceeds cap"):
+        DataQualityGate(load_settings().quality, bus).validate(
+            frame,
+            "MSFT",
+            now=frame.index[-1].to_pydatetime(),
+        )
+    assert len(failures) == 1
+    assert "z-score" in failures[0].payload.reason
+
+
 def test_corporate_action_adjustment_handles_split_and_dividend_exactly() -> None:
     index = pd.date_range("2025-01-01", periods=4, freq="D", tz="UTC")
     raw = pd.Series([100.0, 102.0, 51.0, 52.0], index=index)
