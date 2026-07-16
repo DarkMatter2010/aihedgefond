@@ -5,11 +5,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from lightgbm import Booster
-
 from aihedgefund.core.schemas import (
     Fill,
-    ModelArtifactMetadata,
+    ModelArtifactLoadResult,
+    ModelArtifactSaveRequest,
     OHLCVBar,
     OHLCVRequest,
     Order,
@@ -41,9 +40,9 @@ class ModelArtifactPort(ABC):
     """Port implemented by trained-model persistence adapters."""
 
     @abstractmethod
-    def save(self, model: Booster, metadata: ModelArtifactMetadata) -> Path:
-        """Persist a trained model and its metadata; return the artifact directory."""
+    def save(self, request: ModelArtifactSaveRequest) -> Path:
+        """Persist a native model blob and metadata; return the artifact directory."""
 
     @abstractmethod
-    def load(self, model_hash: str) -> tuple[Booster, ModelArtifactMetadata]:
-        """Load a model and metadata by hash; raise if the artifact is missing."""
+    def load(self, model_hash: str) -> ModelArtifactLoadResult:
+        """Load a model blob and metadata by hash; raise if the artifact is missing."""

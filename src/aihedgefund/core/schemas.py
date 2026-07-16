@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Literal
@@ -547,12 +547,19 @@ class Position(BoundaryDTO):
 class ModelArtifactMetadata(BoundaryDTO):
     """Versioned metadata persisted beside a trained model artifact."""
 
-    model_hash: NonEmptyText
+    model_hash: Annotated[
+        str,
+        StringConstraints(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+    ]
     strategy_id: NonEmptyText
     created_at: AwareDatetime
     universe: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
     features: Annotated[tuple[NonEmptyText, ...], Field(min_length=1)]
     hyperparameters: dict[NonEmptyText, object]
+    seed: Annotated[int, Field(ge=0)]
+    start: date
+    end: date
+    frequency: Literal["1d"]
     model_format: Literal["lightgbm_native"]
     model_file: NonEmptyText
     phase: Annotated[int, Field(ge=0)]
@@ -573,3 +580,25 @@ class ModelArtifactMetadata(BoundaryDTO):
         if isinstance(value, list):
             return tuple(value)
         return value
+
+    @model_validator(mode="after")
+    def end_must_follow_start(self) -> ModelArtifactMetadata:
+        """Reject empty or reversed training windows in artifact metadata."""
+        if self.end <= self.start:
+            msg = "end must be later than start"
+            raise ValueError(msg)
+        return self
+
+
+class ModelArtifactSaveRequest(BoundaryDTO):
+    """Vendor-neutral save payload for model artifact persistence."""
+
+    model_blob: bytes
+    metadata: ModelArtifactMetadata
+
+
+class ModelArtifactLoadResult(BoundaryDTO):
+    """Vendor-neutral load payload returned by model artifact adapters."""
+
+    model_blob: bytes
+    metadata: ModelArtifactMetadata

@@ -74,7 +74,7 @@ class Settings(ConfigModel):
     quality: QualitySettings
     labels: LabelSettings
     fracdiff: FracDiffSettings
-    artifact_root: Path = Path("artifacts/")
+    artifact_root: Path
 
     @field_validator("universe", mode="before")
     @classmethod
