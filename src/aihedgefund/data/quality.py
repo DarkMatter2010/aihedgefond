@@ -11,8 +11,6 @@ from aihedgefund.core.bus import MessageBus
 from aihedgefund.core.config import QualitySettings
 from aihedgefund.core.runtime import Clock, SystemClock
 from aihedgefund.core.schemas import (
-    ExtremeReturnFlag,
-    ExtremeReturnFlagged,
     QualityFailure,
     QualityGateFailed,
     QualityReport,
@@ -45,7 +43,7 @@ class DataQualityGate:
         *,
         now: datetime | None = None,
     ) -> QualityReport:
-        """Return a report when every hard-fail check passes (z-score is soft-flagged)."""
+        """Return a report when every hard-fail check passes."""
         checked_at = now or self._clock.now()
         try:
             report = self._validate(frame, symbol, checked_at)
@@ -126,31 +124,13 @@ class DataQualityGate:
         return_std = float(log_returns.std(ddof=0)) if not log_returns.empty else 0.0
         if return_std == 0.0:
             max_return_zscore = 0.0
-            abs_zscores = pd.Series(dtype=float)
         else:
-            abs_zscores = ((log_returns - log_returns.mean()) / return_std).abs()
-            max_return_zscore = float(abs_zscores.max())
-        # Statistical extremes relative to own history are soft-flagged only.
-        # Physical plausibility remains hard-fail via max_abs_logret above.
+            zscores = ((log_returns - log_returns.mean()) / return_std).abs()
+            max_return_zscore = float(zscores.max())
         if max_return_zscore > self._settings.zscore_cap:
-            flagged = abs_zscores[abs_zscores > self._settings.zscore_cap]
-            for bar_ts, z_score in flagged.items():
-                bar_timestamp = pd.Timestamp(bar_ts)
-                if bar_timestamp.tzinfo is None:
-                    bar_timestamp = bar_timestamp.tz_localize("UTC")
-                else:
-                    bar_timestamp = bar_timestamp.tz_convert("UTC")
-                self._bus.publish_event(
-                    ExtremeReturnFlagged(
-                        timestamp=checked_at,
-                        payload=ExtremeReturnFlag(
-                            symbol=symbol,
-                            bar_timestamp=bar_timestamp.to_pydatetime(),
-                            log_return=float(log_returns.loc[bar_ts]),
-                            z_score=float(z_score),
-                        ),
-                    )
-                )
+            raise DataQualityError(
+                f"{symbol} return z-score {max_return_zscore:.6f} exceeds cap"
+            )
 
         return QualityReport(
             symbol=symbol,
