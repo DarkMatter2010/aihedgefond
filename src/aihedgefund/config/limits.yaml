@@ -7,7 +7,54 @@ trading_limits:
 universe:
   - AAPL
   - MSFT
-  - SPY
+  - AMZN
+  - GOOGL
+  - META
+  - NVDA
+  - JPM
+  - V
+  - UNH
+  - HD
+  - PG
+  - MA
+  - XOM
+  - CVX
+  - ABBV
+  - KO
+  - PEP
+  - MRK
+  - COST
+  - WMT
+  - BAC
+  - ADBE
+  - CSCO
+  - TMO
+  - MCD
+  - ABT
+  - CRM
+  - ACN
+  - NFLX
+  - LIN
+  - DHR
+  - NKE
+  - TXN
+  - NEE
+  - VZ
+  - CMCSA
+  - PM
+  - HON
+  - UNP
+  - INTC
+  - QCOM
+  - LOW
+  - IBM
+  - AMGN
+  - SBUX
+  - CAT
+  - GS
+  - BLK
+  - SPGI
+  - ORCL
 
 feature_flags:
   audit_logging: true

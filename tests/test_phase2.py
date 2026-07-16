@@ -108,6 +108,8 @@ def test_research_settings_loaded_from_yaml() -> None:
     assert settings.research.embargo_days >= settings.research.horizon
     assert settings.research.seed == 42
     assert settings.research.strategy_id == "phase2-lgbm-baseline"
+    assert len(settings.universe) == 50
+    assert len(settings.universe) >= settings.research.min_cs_breadth_for_reliable_ic
 
 
 def test_research_settings_hard_fail_when_embargo_lt_horizon(tmp_path: Path) -> None:
