@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 from lightgbm import Booster
@@ -26,29 +28,50 @@ class FilesystemModelArtifactAdapter(ModelArtifactPort):
         self._artifact_root = artifact_root
 
     def save(self, request: ModelArtifactSaveRequest) -> Path:
-        """Write ``model.txt`` and ``metadata.json``; hard-fail on bad roots."""
+        """Atomically write ``model.txt`` and ``metadata.json`` via write-then-rename."""
         self._require_writable_root()
         metadata = request.metadata
         self._validate_metadata_contract(metadata)
         self._validate_model_hash(metadata)
 
-        artifact_dir = (
-            self._artifact_root / "models" / metadata.strategy_id / metadata.model_hash
-        )
-        artifact_dir.mkdir(parents=True, exist_ok=False)
+        strategy_dir = self._artifact_root / "models" / metadata.strategy_id
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir = strategy_dir / metadata.model_hash
 
-        model_path = artifact_dir / MODEL_FILENAME
-        model_path.write_bytes(request.model_blob)
-
-        metadata_path = artifact_dir / METADATA_FILENAME
-        metadata_path.write_text(
-            metadata.model_dump_json(),
-            encoding="utf-8",
+        # Temp dir must live on the same filesystem as artifact_root so that
+        # os.replace is atomic (cross-device rename is not).
+        tmp_dir = Path(
+            tempfile.mkdtemp(
+                prefix=f".{metadata.model_hash}.tmp-",
+                dir=strategy_dir,
+            )
         )
+        try:
+            (tmp_dir / MODEL_FILENAME).write_bytes(request.model_blob)
+            (tmp_dir / METADATA_FILENAME).write_text(
+                metadata.model_dump_json(),
+                encoding="utf-8",
+            )
+            # Check destination only after both files are fully written so a
+            # hard-fail on an existing target never leaves a half-written final
+            # directory behind.
+            if artifact_dir.exists():
+                msg = f"model artifact already exists: {artifact_dir}"
+                raise FileExistsError(msg)
+            os.replace(tmp_dir, artifact_dir)
+        except Exception:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir)
+            raise
         return artifact_dir
 
     def load(self, model_hash: str) -> ModelArtifactLoadResult:
-        """Locate an artifact by hash and reload blob plus metadata."""
+        """Locate an artifact by hash and reload blob plus metadata.
+
+        Because ``save()`` publishes via atomic rename, any visible artifact
+        directory is always complete (both ``model.txt`` and ``metadata.json``).
+        Do not weaken this assumption by accepting partial on-disk states.
+        """
         matches = sorted(
             path
             for path in (self._artifact_root / "models").glob(f"*/{model_hash}")

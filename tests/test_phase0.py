@@ -570,3 +570,108 @@ def test_load_hard_fails_for_booster_metadata_feature_drift(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="booster features"):
         adapter.load(metadata.model_hash)
+
+
+def _strategy_dir(artifact_root: Path, metadata: ModelArtifactMetadata) -> Path:
+    return artifact_root / "models" / metadata.strategy_id
+
+
+def _tmp_dirs_under(strategy_dir: Path) -> list[Path]:
+    if not strategy_dir.exists():
+        return []
+    return [
+        path
+        for path in strategy_dir.iterdir()
+        if path.is_dir() and ".tmp-" in path.name
+    ]
+
+
+def test_save_hard_fails_when_artifact_already_exists(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    adapter = FilesystemModelArtifactAdapter(artifact_root)
+    model = _train_dummy_booster()
+    metadata = _make_metadata()
+    request = ModelArtifactSaveRequest(
+        model_blob=model.model_to_string().encode("utf-8"),
+        metadata=metadata,
+    )
+    first_dir = adapter.save(request)
+
+    with pytest.raises(FileExistsError, match="model artifact already exists"):
+        adapter.save(request)
+
+    assert first_dir.is_dir()
+    assert (first_dir / "model.txt").is_file()
+    assert (first_dir / "metadata.json").is_file()
+    assert _tmp_dirs_under(_strategy_dir(artifact_root, metadata)) == []
+
+
+def test_save_crash_between_writes_leaves_no_incomplete_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    adapter = FilesystemModelArtifactAdapter(artifact_root)
+    model = _train_dummy_booster()
+    metadata = _make_metadata()
+    request = ModelArtifactSaveRequest(
+        model_blob=model.model_to_string().encode("utf-8"),
+        metadata=metadata,
+    )
+    artifact_dir = _strategy_dir(artifact_root, metadata) / metadata.model_hash
+    original_write_text = Path.write_text
+
+    def crash_on_metadata_write(
+        self: Path,
+        data: str | bytes,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if self.name == "metadata.json":
+            raise RuntimeError("simulated crash after model.txt write")
+        return original_write_text(
+            self,
+            data,
+            encoding=encoding,
+            errors=errors,
+            newline=newline,
+        )
+
+    monkeypatch.setattr(Path, "write_text", crash_on_metadata_write)
+
+    with pytest.raises(RuntimeError, match="simulated crash after model.txt write"):
+        adapter.save(request)
+
+    assert not artifact_dir.exists()
+    assert _tmp_dirs_under(_strategy_dir(artifact_root, metadata)) == []
+
+    monkeypatch.undo()
+    recovered_dir = adapter.save(request)
+
+    assert recovered_dir == artifact_dir
+    assert (artifact_dir / "model.txt").is_file()
+    assert (artifact_dir / "metadata.json").is_file()
+    assert _tmp_dirs_under(_strategy_dir(artifact_root, metadata)) == []
+
+
+def test_successful_save_leaves_no_tmp_directories(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    adapter = FilesystemModelArtifactAdapter(artifact_root)
+    model = _train_dummy_booster()
+    metadata = _make_metadata()
+    request = ModelArtifactSaveRequest(
+        model_blob=model.model_to_string().encode("utf-8"),
+        metadata=metadata,
+    )
+
+    artifact_dir = adapter.save(request)
+
+    assert artifact_dir.is_dir()
+    assert _tmp_dirs_under(_strategy_dir(artifact_root, metadata)) == []
+    assert sorted(artifact_dir.iterdir()) == sorted(
+        [artifact_dir / "model.txt", artifact_dir / "metadata.json"]
+    )
