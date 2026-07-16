@@ -37,3 +37,5 @@ labels:
 fracdiff:
   d: 0.40
   thresh: 0.0001
+
+artifact_root: artifacts/

@@ -74,6 +74,7 @@ class Settings(ConfigModel):
     quality: QualitySettings
     labels: LabelSettings
     fracdiff: FracDiffSettings
+    artifact_root: Path
 
     @field_validator("universe", mode="before")
     @classmethod
@@ -81,6 +82,14 @@ class Settings(ConfigModel):
         """Convert YAML's native list representation to an immutable tuple."""
         if isinstance(value, list):
             return tuple(value)
+        return value
+
+    @field_validator("artifact_root", mode="before")
+    @classmethod
+    def coerce_artifact_root(cls, value: object) -> object:
+        """Accept YAML strings while keeping a typed Path in Settings."""
+        if isinstance(value, str):
+            return Path(value)
         return value
 
     @model_validator(mode="after")
