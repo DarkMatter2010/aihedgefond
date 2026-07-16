@@ -165,6 +165,28 @@ def test_embargo_split_rejects_overlapping_label_windows() -> None:
         )
 
 
+def test_embargo_split_rejects_bar_gap_equal_horizon() -> None:
+    """calendar_gap can exceed embargo while trading-bar gap == horizon.
+
+    Business-day example: train_end=2024-04-26, test_start=2024-05-03,
+    horizon=5 → calendar_gap=7 >= 5, but bar_gap=5 == horizon (leakage).
+    """
+    bars = multi_symbol_bars()
+    bus = InProcessMessageBus()
+    features = FeaturePipeline(bus).compute(bars)
+    labels, _ = make_forward_return_labels(bars, horizon=HORIZON)
+    dataset = assemble_baseline_dataset(features, labels, horizon=HORIZON)
+
+    with pytest.raises(ValueError, match="bar gap"):
+        time_embargo_split(
+            dataset,
+            train_end=date(2024, 4, 26),
+            test_start=date(2024, 5, 3),
+            embargo_days=HORIZON,
+            horizon=HORIZON,
+        )
+
+
 def test_embargo_split_has_no_label_window_overlap() -> None:
     bars = multi_symbol_bars()
     bus = InProcessMessageBus()
@@ -182,9 +204,19 @@ def test_embargo_split_has_no_label_window_overlap() -> None:
 
     assert split_def.train_rows > 0
     assert split_def.test_rows > 0
-    max_train = train.features.index.get_level_values("timestamp").max()
-    min_test = test.features.index.get_level_values("timestamp").min()
-    assert max_train + pd.Timedelta(days=HORIZON) < min_test
+    full_index = dataset.features.index
+    for symbol in sorted(set(train.features.index.get_level_values("symbol"))):
+        full_symbol_ts = pd.DatetimeIndex(
+            full_index.get_level_values("timestamp")[
+                full_index.get_level_values("symbol") == symbol
+            ].unique()
+        ).sort_values()
+        max_tr = train.features.xs(symbol, level="symbol").index.max()
+        min_te = test.features.xs(symbol, level="symbol").index.min()
+        train_pos = full_symbol_ts.get_loc(max_tr)
+        test_pos = full_symbol_ts.get_loc(min_te)
+        assert isinstance(train_pos, int) and isinstance(test_pos, int)
+        assert test_pos - train_pos > HORIZON
     assert set(train.features.index).isdisjoint(set(test.features.index))
 
 

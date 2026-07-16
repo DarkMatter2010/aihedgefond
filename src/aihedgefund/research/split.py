@@ -98,18 +98,6 @@ def _assert_no_label_window_overlap(
     trading-bar gap is not undercounted when embargo rows are excluded from
     both train and test.
     """
-    train_ts = train.features.index.get_level_values("timestamp")
-    test_ts = test.features.index.get_level_values("timestamp")
-    max_train = pd.Timestamp(train_ts.max())
-    min_test = pd.Timestamp(test_ts.min())
-    label_end = max_train + pd.Timedelta(days=horizon)
-    if label_end >= min_test:
-        msg = (
-            "train/test label windows overlap: "
-            f"max train label end {label_end} >= min test timestamp {min_test}"
-        )
-        raise ValueError(msg)
-
     for symbol in sorted(set(train.features.index.get_level_values("symbol"))):
         if symbol not in test.features.index.get_level_values("symbol"):
             continue
@@ -124,10 +112,12 @@ def _assert_no_label_window_overlap(
         if not isinstance(train_pos, int) or not isinstance(test_pos, int):
             msg = f"{symbol}: ambiguous timestamp positions in split calendar"
             raise ValueError(msg)
+        # shift(-h) at train_pos reads close at train_pos + h; require strict
+        # separation so that bar does not land on (or past) the first test bar.
         bar_gap = test_pos - train_pos
-        if bar_gap < horizon:
+        if bar_gap <= horizon:
             msg = (
-                f"{symbol}: bar gap {bar_gap} between train/test is < horizon "
-                f"{horizon}; label windows would overlap"
+                f"{symbol}: bar gap {bar_gap} between train/test is <= horizon "
+                f"{horizon}; need bar_gap > horizon or label windows overlap"
             )
             raise ValueError(msg)
