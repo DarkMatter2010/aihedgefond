@@ -17,7 +17,9 @@ Must be supplied by the caller from the variance of **independent research
 configurations** actually tested (see ``research_trials``). It must **not**
 be estimated from CPCV path-Sharpe dispersion.
 
-Verdict rule (hard): ``JA`` iff ``dsr > 0``, else ``NEIN``.
+Verdict rule (hard): ``JA`` iff ``dsr >= 0.95``, else ``NEIN``.
+``dsr`` is Φ(z); a ``> 0`` threshold is vacuous for finite z and was part of
+the false-positive path that rubber-stamped near-noise candidates.
 """
 
 from __future__ import annotations
@@ -221,7 +223,7 @@ def run_overfitting_gate(
         raise RuntimeError(msg)
 
     return GateVerdict(
-        verdict="JA" if deflated.dsr > 0.0 else "NEIN",
+        verdict="JA" if deflated.dsr >= 0.95 else "NEIN",
         dsr=deflated.dsr,
         n_trials=n_trials,
         path_sharpe_mean=path_mean,

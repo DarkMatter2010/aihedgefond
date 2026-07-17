@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from aihedgefund.core.schemas import BaselineDataset, CPCVConfig
+from aihedgefund.core.schemas import BaselineDataset, CPCVConfig, GateVerdict
 from aihedgefund.research.baseline import build_lgbm_params
 from aihedgefund.research.cpcv import (
     _label_end_times,
@@ -496,7 +496,7 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
     first = run_overfitting_gate(**kwargs)
     second = run_overfitting_gate(**kwargs)
     assert first.verdict in {"JA", "NEIN"}
-    assert first.verdict == ("JA" if first.dsr > 0.0 else "NEIN")
+    assert first.verdict == ("JA" if first.dsr >= 0.95 else "NEIN")
     assert first.n_trials == 12
     assert first.cpcv.n_folds == 4
     assert first.dsr == second.dsr
@@ -579,11 +579,50 @@ def test_known_noise_via_real_gate_aggregation_path() -> None:
     assert verdict.deflated.n_obs > verdict.cpcv.n_folds
     assert verdict.deflated.var_trial_sharpes == pytest.approx(VAR_TRIAL)
     # Hard threshold on the real aggregation path: noise must stay well below
-    # the old false-positive regime (~0.9). (GateVerdict still maps dsr>0→JA;
-    # live acceptance uses the permutation-null 95% rule.)
+    # the old false-positive regime (~0.9). Gate JA requires dsr >= 0.95.
     assert verdict.dsr < 0.1, (
         f"known-noise DSR={verdict.dsr} too high — gate aggregation still inflated"
     )
+    assert verdict.verdict == "NEIN"
+
+
+def test_near_null_dsr_cannot_be_labelled_ja() -> None:
+    """Near-null Φ(z) must not rubber-stamp JA under the vacuous dsr>0 rule."""
+    dataset, bar_calendar = _mini_dataset(n_days=80, n_symbols=4, horizon=2, seed=SEED)
+    config = CPCVConfig(n_blocks=4, n_test_blocks=1, embargo_days=2, horizon=2)
+    params = build_lgbm_params(
+        seed=SEED,
+        learning_rate=0.1,
+        num_leaves=8,
+        min_data_in_leaf=5,
+        feature_fraction=1.0,
+        bagging_fraction=1.0,
+        bagging_freq=0,
+    )
+    verdict = run_overfitting_gate(
+        dataset=dataset,
+        cpcv_config=config,
+        model_params=params,
+        num_boost_round=20,
+        n_trials=12,
+        var_trial_sharpes=VAR_TRIAL,
+        seed=SEED,
+        universe=("S0", "S1", "S2", "S3"),
+        start=date(2024, 1, 2),
+        end=date(2024, 4, 30),
+        frequency="1d",
+        bar_timestamps=bar_calendar,
+    )
+    payload = verdict.model_dump()
+    # Live-claim class: DSR≈2.7e-06 is >0 but must not be JA.
+    payload["dsr"] = 2.7e-06
+    payload["verdict"] = "JA"
+    with pytest.raises(ValidationError, match="inconsistent with dsr"):
+        GateVerdict.model_validate(payload)
+    payload["verdict"] = "NEIN"
+    ok = GateVerdict.model_validate(payload)
+    assert ok.verdict == "NEIN"
+    assert ok.dsr == pytest.approx(2.7e-06)
 
 
 def test_merge_cpcv_path_returns_sets_t() -> None:
