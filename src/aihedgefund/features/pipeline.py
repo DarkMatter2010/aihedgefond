@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import isfinite
-from typing import Literal
+from typing import Literal, cast
 
+import numpy as np
 import pandas as pd
 
 from aihedgefund.core.bus import MessageBus
@@ -21,17 +22,22 @@ from aihedgefund.core.schemas import (
 from aihedgefund.data.corporate_actions import adjust_corporate_actions
 from aihedgefund.features.indicators import (
     atr,
+    gain_loss_ratio,
     log_return,
     macd,
+    mean_reversion,
     momentum,
     moving_average_ratio,
     realized_volatility,
+    rolling_return_std,
     rolling_zscore,
     rsi,
+    volume_ratio,
 )
 from aihedgefund.features.pit import assert_no_lookahead
 
-FEATURE_COLUMNS = (
+# Existing Phase-1 baseline columns (unchanged names/semantics).
+_BASELINE_FEATURE_COLUMNS = (
     "log_return",
     "realized_vol_20",
     "momentum_20",
@@ -42,17 +48,38 @@ FEATURE_COLUMNS = (
     "atr_14",
     "close_zscore_20",
 )
-FEATURE_DTYPES: tuple[Literal["float64"], ...] = (
-    "float64",
-    "float64",
-    "float64",
-    "float64",
-    "float64",
-    "float64",
-    "float64",
-    "float64",
-    "float64",
+
+# New Phase-2 expansion raw features (cross-sectionals derived below).
+NEW_RAW_FEATURE_COLUMNS = (
+    "momentum_5",
+    "momentum_10",
+    "momentum_60",
+    "ret_std_10",
+    "ret_std_20",
+    "ret_std_60",
+    "mean_reversion_20",
+    "gain_loss_ratio_14",
+    "volume_ratio_20",
 )
+
+_NEW_CS_FEATURE_COLUMNS = tuple(
+    name
+    for column in NEW_RAW_FEATURE_COLUMNS
+    for name in (f"{column}_cs_rank", f"{column}_cs_zscore")
+)
+
+FEATURE_COLUMNS = (
+    *_BASELINE_FEATURE_COLUMNS,
+    *NEW_RAW_FEATURE_COLUMNS,
+    *_NEW_CS_FEATURE_COLUMNS,
+)
+FEATURE_DTYPES: tuple[Literal["float64"], ...] = cast(
+    tuple[Literal["float64"], ...],
+    tuple("float64" for _ in FEATURE_COLUMNS),
+)
+
+# Longest rolling window among new features (warmup NaNs drop downstream).
+MAX_FEATURE_WARMUP_BARS = 60
 
 
 @dataclass(frozen=True)
@@ -76,6 +103,7 @@ def compute_symbol_features(
 ) -> pd.DataFrame:
     """Compute indicators whose row at t uses no observation after t."""
     close = frame["close"]
+    volume = frame["volume"]
     macd_frame = macd(
         close,
         parameters.macd_fast,
@@ -92,9 +120,58 @@ def compute_symbol_features(
             macd_frame,
             atr(frame, parameters.atr_period),
             rolling_zscore(close, parameters.zscore_window),
+            momentum(close, 5),
+            momentum(close, 10),
+            momentum(close, 60),
+            rolling_return_std(close, 10),
+            rolling_return_std(close, 20),
+            rolling_return_std(close, 60),
+            mean_reversion(close, 20),
+            gain_loss_ratio(close, 14),
+            volume_ratio(volume, 20),
         ),
         axis=1,
     )
+
+
+def _cross_sectional_std(values: pd.Series) -> float:
+    """Population std over finite observations; 0.0 when n<2 (neutral z-score)."""
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size < 2:
+        # Singleton (or empty) cross-section: downstream treats 0-std as NaN z,
+        # so return NaN here and map z to 0.0 explicitly in the caller.
+        return float("nan")
+    return float(np.std(finite, ddof=0))
+
+
+def add_cross_sectional_features(
+    matrix: pd.DataFrame,
+    raw_columns: tuple[str, ...] = NEW_RAW_FEATURE_COLUMNS,
+) -> pd.DataFrame:
+    """Per-date rank and z-score using only symbols with a finite value at t."""
+    if list(matrix.index.names) != ["timestamp", "symbol"]:
+        msg = "feature matrix index names must be ('timestamp', 'symbol')"
+        raise ValueError(msg)
+    missing = [column for column in raw_columns if column not in matrix.columns]
+    if missing:
+        msg = f"cross-sectional base columns missing: {missing}"
+        raise ValueError(msg)
+
+    extras: dict[str, pd.Series] = {}
+    for column in raw_columns:
+        series = matrix[column]
+        grouped = series.groupby(level="timestamp", sort=False)
+        # rank/mean/std skip NaNs, so only available symbols at t participate.
+        extras[f"{column}_cs_rank"] = grouped.rank(method="average", pct=True)
+        mean = grouped.transform("mean")
+        std = grouped.transform(_cross_sectional_std)
+        zscore = (series - mean) / std
+        # n<2 or zero variance → neutral 0.0 when the raw feature itself is finite.
+        zscore = zscore.where(series.isna(), zscore.fillna(0.0))
+        extras[f"{column}_cs_zscore"] = zscore
+
+    return pd.concat((matrix, pd.DataFrame(extras, index=matrix.index)), axis=1)
 
 
 class FeaturePipeline:
@@ -129,6 +206,7 @@ class FeaturePipeline:
         }
         matrix = pd.concat(per_symbol, names=("symbol", "timestamp"))
         matrix = matrix.reorder_levels(("timestamp", "symbol")).sort_index()
+        matrix = add_cross_sectional_features(matrix, NEW_RAW_FEATURE_COLUMNS)
         matrix = matrix.loc[:, list(FEATURE_COLUMNS)].astype(
             {column: "float64" for column in FEATURE_COLUMNS}
         )

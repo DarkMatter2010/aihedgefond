@@ -112,3 +112,51 @@ def rolling_zscore(close: pd.Series, window: int) -> pd.Series:
     mean = values.rolling(window, min_periods=window).mean()
     std = values.rolling(window, min_periods=window).std(ddof=0)
     return ((values - mean) / std.replace(0.0, np.nan)).rename(f"close_zscore_{window}")
+
+
+def rolling_return_std(close: pd.Series, window: int) -> pd.Series:
+    """Causal rolling standard deviation of completed log returns."""
+    if window < 2:
+        msg = "window must be at least two"
+        raise ValueError(msg)
+    return (
+        log_return(close)
+        .rolling(window, min_periods=window)
+        .std(ddof=0)
+        .rename(f"ret_std_{window}")
+    )
+
+
+def mean_reversion(close: pd.Series, window: int) -> pd.Series:
+    """Close deviation from its trailing SMA, scaled by the SMA."""
+    if window < 2:
+        msg = "window must be at least two"
+        raise ValueError(msg)
+    values = close.astype(float)
+    trailing_mean = values.rolling(window, min_periods=window).mean()
+    return ((values - trailing_mean) / trailing_mean).rename(f"mean_reversion_{window}")
+
+
+def gain_loss_ratio(close: pd.Series, period: int) -> pd.Series:
+    """Wilder-smoothed average-gain / average-loss ratio (RSI numerator path)."""
+    if period < 2:
+        msg = "period must be at least two"
+        raise ValueError(msg)
+    delta = close.astype(float).diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    average_gain = gain.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    average_loss = loss.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+    ratio = average_gain / average_loss.replace(0.0, np.nan)
+    ratio = ratio.mask((average_gain == 0.0) & (average_loss == 0.0))
+    return ratio.rename(f"gain_loss_ratio_{period}")
+
+
+def volume_ratio(volume: pd.Series, window: int) -> pd.Series:
+    """Current volume divided by its trailing simple moving average."""
+    if window < 2:
+        msg = "window must be at least two"
+        raise ValueError(msg)
+    values = volume.astype(float)
+    trailing_mean = values.rolling(window, min_periods=window).mean()
+    return (values / trailing_mean.replace(0.0, np.nan)).rename(f"volume_ratio_{window}")
