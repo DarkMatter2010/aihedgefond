@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from aihedgefund.core.bus import InProcessMessageBus
 from aihedgefund.core.config import load_settings
-from aihedgefund.core.schemas import BarFrame, Phase2Sidecar
+from aihedgefund.core.schemas import BarFrame, BaselineDataset, Phase2Sidecar
 from aihedgefund.features.pipeline import FEATURE_COLUMNS, FeaturePipeline
 from aihedgefund.research.adapters.filesystem import FilesystemModelArtifactAdapter
 from aihedgefund.research.baseline import (
@@ -110,6 +110,69 @@ def test_research_settings_loaded_from_yaml() -> None:
     assert settings.research.strategy_id == "phase2-lgbm-baseline"
     assert len(settings.universe) == 50
     assert len(settings.universe) >= settings.research.min_cs_breadth_for_reliable_ic
+
+
+def _nyse_new_year_holiday_dataset() -> BaselineDataset:
+    """Business-day bars around Dec-2022/Jan-2023 without Observed New Year.
+
+    2023-01-02 was an Observed New Year holiday (Monday). A plain ``freq="B"``
+    index would include it and understate the trading-bar gap.
+    """
+    bdays = pd.bdate_range("2022-12-01", "2023-01-31", tz="UTC")
+    holiday = pd.Timestamp("2023-01-02", tz="UTC")
+    assert holiday in bdays
+    calendar = bdays.delete(bdays.get_loc(holiday))
+    assert holiday not in calendar
+
+    symbol = "AAA"
+    n = len(calendar)
+    multi = pd.MultiIndex.from_arrays(
+        [calendar, [symbol] * n],
+        names=["timestamp", "symbol"],
+    )
+    features = pd.DataFrame(
+        {column: np.linspace(0.0, 1.0, n, dtype=np.float64) for column in FEATURE_COLUMNS},
+        index=multi,
+    )
+    label = pd.Series(np.zeros(n, dtype=np.float64), index=multi, name="forward_return_5")
+    return BaselineDataset(
+        features=features,
+        label=label,
+        horizon=HORIZON,
+        feature_columns=FEATURE_COLUMNS,
+    )
+
+
+def test_production_split_survives_nyse_new_year_holiday() -> None:
+    """Production train_end/test_start must keep bar_gap > horizon across 2023-01-02.
+
+    Empirically: train_end=2022-12-30 + test_start=2023-01-09 → bar_gap=5 == horizon
+    (leakage); test_start=2023-01-10 → bar_gap=6 > horizon.
+    """
+    settings = load_settings()
+    assert settings.research.train_end == date(2022, 12, 30)
+    assert settings.research.test_start == date(2023, 1, 10)
+
+    dataset = _nyse_new_year_holiday_dataset()
+    train, test, split_def = time_embargo_split(
+        dataset,
+        train_end=date(2022, 12, 30),
+        test_start=date(2023, 1, 10),
+        embargo_days=HORIZON,
+        horizon=HORIZON,
+    )
+    assert split_def.train_rows > 0
+    assert split_def.test_rows > 0
+    assert set(train.features.index).isdisjoint(set(test.features.index))
+
+    with pytest.raises(ValueError, match="bar gap"):
+        time_embargo_split(
+            dataset,
+            train_end=date(2022, 12, 30),
+            test_start=date(2023, 1, 9),
+            embargo_days=HORIZON,
+            horizon=HORIZON,
+        )
 
 
 def test_research_settings_hard_fail_when_embargo_lt_horizon(tmp_path: Path) -> None:
