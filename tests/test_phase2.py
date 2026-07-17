@@ -455,11 +455,20 @@ def test_phase2_modules_do_not_import_yfinance() -> None:
     import aihedgefund.research.baseline as baseline
     import aihedgefund.research.dataset as dataset
     import aihedgefund.research.forward_labels as forward_labels
+    import aihedgefund.research.horizon_sweep as horizon_sweep
     import aihedgefund.research.metrics as metrics
     import aihedgefund.research.run_baseline as run_mod
     import aihedgefund.research.split as split
 
-    for module in (baseline, dataset, forward_labels, metrics, run_mod, split):
+    for module in (
+        baseline,
+        dataset,
+        forward_labels,
+        horizon_sweep,
+        metrics,
+        run_mod,
+        split,
+    ):
         assert "yfinance" not in module.__dict__
         assert "yfinance" not in getattr(module, "__file__", "")
 
@@ -709,3 +718,171 @@ def test_new_raw_features_ignore_post_anchor_spike(feature_name: str, builder) -
     assert baseline.loc[anchor] == pytest.approx(float(after_spike.loc[anchor]))
     later = frame.index[min(anchor_pos + 5, rows - 1)]
     assert baseline.loc[later] != pytest.approx(float(after_spike.loc[later]))
+
+
+def test_horizon_sweep_row_hard_fails_when_embargo_ne_horizon() -> None:
+    from aihedgefund.core.schemas import HorizonSweepRow
+
+    with pytest.raises(ValidationError, match="embargo_days"):
+        HorizonSweepRow(
+            horizon=5,
+            ic_mean=0.01,
+            rank_ic_mean=0.01,
+            icir=0.1,
+            ic_materially_positive=False,
+            n_symbols=4,
+            embargo_days=4,
+            test_start=date(2024, 5, 8),
+            train_end=date(2024, 4, 30),
+        )
+
+
+def test_resolve_leakage_safe_test_start_keeps_configured_when_valid() -> None:
+    from aihedgefund.research.horizon_sweep import resolve_leakage_safe_test_start
+
+    bars = multi_symbol_bars()
+    labels, _ = make_forward_return_labels(bars, horizon=HORIZON)
+    features = FeaturePipeline(InProcessMessageBus()).compute(bars)
+    dataset = assemble_baseline_dataset(
+        features,
+        labels,
+        horizon=HORIZON,
+        feature_columns=FEATURE_COLUMNS,
+    )
+    resolved = resolve_leakage_safe_test_start(
+        dataset,
+        train_end=date(2024, 4, 30),
+        configured_test_start=date(2024, 5, 8),
+        horizon=HORIZON,
+    )
+    assert resolved == date(2024, 5, 8)
+
+
+def test_resolve_leakage_safe_test_start_advances_for_large_horizon() -> None:
+    from aihedgefund.research.horizon_sweep import resolve_leakage_safe_test_start
+
+    horizon = 20
+    bars = multi_symbol_bars()
+    labels, _ = make_forward_return_labels(bars, horizon=horizon)
+    features = FeaturePipeline(InProcessMessageBus()).compute(bars)
+    dataset = assemble_baseline_dataset(
+        features,
+        labels,
+        horizon=horizon,
+        feature_columns=FEATURE_COLUMNS,
+    )
+    configured = date(2024, 5, 8)
+    resolved = resolve_leakage_safe_test_start(
+        dataset,
+        train_end=date(2024, 4, 30),
+        configured_test_start=configured,
+        horizon=horizon,
+    )
+    assert resolved > configured
+    assert (resolved - date(2024, 4, 30)).days >= horizon
+    train, test, split_def = time_embargo_split(
+        dataset,
+        train_end=date(2024, 4, 30),
+        test_start=resolved,
+        embargo_days=horizon,
+        horizon=horizon,
+    )
+    assert split_def.embargo_days == horizon
+    assert train.features.shape[0] > 0
+    assert test.features.shape[0] > 0
+
+
+def test_resolve_leakage_safe_test_start_hard_fails_when_budget_exhausted() -> None:
+    from aihedgefund.research.horizon_sweep import resolve_leakage_safe_test_start
+
+    horizon = 20
+    bars = multi_symbol_bars()
+    labels, _ = make_forward_return_labels(bars, horizon=horizon)
+    features = FeaturePipeline(InProcessMessageBus()).compute(bars)
+    dataset = assemble_baseline_dataset(
+        features,
+        labels,
+        horizon=horizon,
+        feature_columns=FEATURE_COLUMNS,
+    )
+    with pytest.raises(ValueError, match="no leakage-safe test_start"):
+        resolve_leakage_safe_test_start(
+            dataset,
+            train_end=date(2024, 4, 30),
+            configured_test_start=date(2024, 5, 8),
+            horizon=horizon,
+            max_advance_days=0,
+        )
+
+
+def test_horizon_sweep_reproducible_with_fixed_seed(tmp_path: Path) -> None:
+    from aihedgefund.research.horizon_sweep import (
+        format_sweep_table,
+        run_horizon_sweep,
+    )
+
+    settings = phase2_settings(tmp_path)
+    bars = multi_symbol_bars()
+    features = FeaturePipeline(InProcessMessageBus()).compute(bars)
+    adapter = FilesystemModelArtifactAdapter(settings.artifact_root)
+
+    report_a = run_horizon_sweep(
+        bars,
+        features,
+        settings,
+        horizons=(1, 2, 5),
+        artifact_adapter=adapter,
+        created_at=CREATED_AT,
+        persist_artifact=False,
+    )
+    report_b = run_horizon_sweep(
+        bars,
+        features,
+        settings,
+        horizons=(1, 2, 5),
+        artifact_adapter=adapter,
+        created_at=CREATED_AT,
+        persist_artifact=False,
+    )
+
+    assert report_a.seed == SEED
+    assert report_a.n_symbols == 4
+    assert [row.horizon for row in report_a.rows] == [1, 2, 5]
+    for row_a, row_b in zip(report_a.rows, report_b.rows, strict=True):
+        assert row_a.horizon == row_b.horizon
+        assert row_a.embargo_days == row_a.horizon
+        assert row_a.ic_mean == row_b.ic_mean
+        assert row_a.rank_ic_mean == row_b.rank_ic_mean
+        assert row_a.icir == row_b.icir
+        assert row_a.ic_materially_positive == row_b.ic_materially_positive
+        assert row_a.n_symbols == report_a.n_symbols
+
+    table = format_sweep_table(report_a)
+    for column in (
+        "horizon",
+        "ic_mean",
+        "rank_ic_mean",
+        "icir",
+        "ic_materially_positive",
+        "n_symbols",
+    ):
+        assert column in table
+    assert table.count("\n") >= 4
+
+
+def test_horizon_sweep_rejects_duplicate_horizons(tmp_path: Path) -> None:
+    from aihedgefund.research.horizon_sweep import run_horizon_sweep
+
+    settings = phase2_settings(tmp_path)
+    bars = multi_symbol_bars()
+    features = FeaturePipeline(InProcessMessageBus()).compute(bars)
+    with pytest.raises(ValueError, match="unique"):
+        run_horizon_sweep(
+            bars,
+            features,
+            settings,
+            horizons=(5, 5),
+            artifact_adapter=FilesystemModelArtifactAdapter(settings.artifact_root),
+            created_at=CREATED_AT,
+            persist_artifact=False,
+        )

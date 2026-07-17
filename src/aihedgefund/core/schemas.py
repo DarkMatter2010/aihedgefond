@@ -774,3 +774,54 @@ class Phase2Sidecar(BoundaryDTO):
         if isinstance(value, list):
             return tuple(value)
         return value
+
+
+class HorizonSweepRow(BoundaryDTO):
+    """One horizon row from the multi-horizon IC diagnostic sweep."""
+
+    horizon: Annotated[int, Field(ge=1)]
+    ic_mean: FiniteFloat
+    rank_ic_mean: FiniteFloat
+    icir: FiniteFloat | None
+    ic_materially_positive: bool
+    n_symbols: Annotated[int, Field(ge=1)]
+    embargo_days: Annotated[int, Field(ge=1)]
+    test_start: date
+    train_end: date
+
+    @model_validator(mode="after")
+    def embargo_must_match_horizon(self) -> HorizonSweepRow:
+        """Sweep contract: embargo_days equals the evaluated horizon."""
+        if self.embargo_days != self.horizon:
+            msg = "horizon sweep requires embargo_days == horizon"
+            raise ValueError(msg)
+        return self
+
+
+class HorizonSweepReport(BoundaryDTO):
+    """Ordered multi-horizon IC sweep results for one loaded bar set."""
+
+    rows: Annotated[tuple[HorizonSweepRow, ...], Field(min_length=1)]
+    n_symbols: Annotated[int, Field(ge=1)]
+    seed: Annotated[int, Field(ge=0)]
+
+    @field_validator("rows", mode="before")
+    @classmethod
+    def freeze_rows(cls, value: object) -> object:
+        """Accept list payloads while storing an immutable tuple."""
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @model_validator(mode="after")
+    def rows_must_share_symbol_count(self) -> HorizonSweepReport:
+        """Every row must report the same universe breadth as the report."""
+        mismatched = [row.horizon for row in self.rows if row.n_symbols != self.n_symbols]
+        if mismatched:
+            msg = f"n_symbols mismatch for horizons {mismatched}"
+            raise ValueError(msg)
+        horizons = [row.horizon for row in self.rows]
+        if len(horizons) != len(set(horizons)):
+            msg = "horizon sweep rows must have unique horizons"
+            raise ValueError(msg)
+        return self
