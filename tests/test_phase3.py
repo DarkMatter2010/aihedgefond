@@ -466,6 +466,35 @@ def test_scores_to_strategy_returns_schema() -> None:
     assert out.dtype == np.float64
 
 
+def test_gate_requires_var_trial_sharpes_kwarg() -> None:
+    """``var_trial_sharpes`` is a required caller parameter (no path-var default)."""
+    dataset, bar_calendar = _mini_dataset(n_days=40, n_symbols=4, horizon=2, seed=SEED)
+    config = CPCVConfig(n_blocks=3, n_test_blocks=1, embargo_days=2, horizon=2)
+    params = build_lgbm_params(
+        seed=SEED,
+        learning_rate=0.1,
+        num_leaves=8,
+        min_data_in_leaf=5,
+        feature_fraction=1.0,
+        bagging_fraction=1.0,
+        bagging_freq=0,
+    )
+    with pytest.raises(TypeError, match="var_trial_sharpes"):
+        run_overfitting_gate(  # type: ignore[call-arg]
+            dataset,
+            cpcv_config=config,
+            model_params=params,
+            num_boost_round=10,
+            n_trials=N_RESEARCH_TRIALS,
+            seed=SEED,
+            universe=("S0", "S1", "S2", "S3"),
+            start=date(2024, 1, 2),
+            end=date(2024, 3, 29),
+            frequency="1d",
+            bar_timestamps=bar_calendar,
+        )
+
+
 def test_gate_verdict_schema_and_reproducibility() -> None:
     """Full gate returns a validated GateVerdict and is seed-stable."""
     dataset, bar_calendar = _mini_dataset(n_days=80, n_symbols=4, horizon=2, seed=SEED)
@@ -484,7 +513,7 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
         cpcv_config=config,
         model_params=params,
         num_boost_round=20,
-        n_trials=12,
+        n_trials=N_RESEARCH_TRIALS,
         var_trial_sharpes=VAR_TRIAL,
         seed=SEED,
         universe=("S0", "S1", "S2", "S3"),
@@ -497,7 +526,7 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
     second = run_overfitting_gate(**kwargs)
     assert first.verdict in {"JA", "NEIN"}
     assert first.verdict == ("JA" if first.dsr >= 0.95 else "NEIN")
-    assert first.n_trials == 12
+    assert first.n_trials == N_RESEARCH_TRIALS
     assert first.cpcv.n_folds == 4
     assert first.dsr == second.dsr
     assert first.path_sharpe_mean == second.path_sharpe_mean
@@ -505,12 +534,19 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
     # T must be the merged return series length, not the fold count.
     assert first.deflated.n_obs != first.cpcv.n_folds
     assert first.deflated.var_trial_sharpes == pytest.approx(VAR_TRIAL)
+    # Path-Sharpe dispersion is diagnostic only — must not equal var_trial.
+    if first.path_sharpe_std > 0.0:
+        path_var = float(first.path_sharpe_std**2)
+        assert first.deflated.var_trial_sharpes != pytest.approx(
+            path_var, rel=1e-6, abs=1e-12
+        )
 
 
 def test_research_trial_sharpes_source_not_cpcv_paths() -> None:
-    """var_trial_sharpes comes from the documented research-trial table."""
-    assert N_RESEARCH_TRIALS == 12
+    """var_trial_sharpes from logged Sharpes; n_trials rounds up conservatively."""
+    assert N_RESEARCH_TRIALS == 15
     assert len(RESEARCH_TRIAL_SHARPES) == 12
+    assert N_RESEARCH_TRIALS >= len(RESEARCH_TRIAL_SHARPES)
     assert research_trial_sharpe_variance() > 0.0
 
 
@@ -604,7 +640,7 @@ def test_near_null_dsr_cannot_be_labelled_ja() -> None:
         cpcv_config=config,
         model_params=params,
         num_boost_round=20,
-        n_trials=12,
+        n_trials=N_RESEARCH_TRIALS,
         var_trial_sharpes=VAR_TRIAL,
         seed=SEED,
         universe=("S0", "S1", "S2", "S3"),
@@ -636,7 +672,7 @@ def test_merge_cpcv_path_returns_sets_t() -> None:
     assert float(merged.loc[pd.Timestamp("2024-01-03", tz="UTC")]) == pytest.approx(0.03)
     report = deflated_sharpe(
         merged.to_numpy(),
-        n_trials=12,
+        n_trials=N_RESEARCH_TRIALS,
         var_trial_sharpes=VAR_TRIAL,
     )
     assert report.n_obs == len(merged)

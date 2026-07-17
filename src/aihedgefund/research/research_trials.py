@@ -4,8 +4,8 @@
 independent research configurations actually tested — never from CPCV path
 Sharpes (those share overlapping train/test windows and are not i.i.d. trials).
 
-Source of ``RESEARCH_TRIAL_SHARPES``
------------------------------------
+Source of ``RESEARCH_TRIAL_SHARPES`` (variance table)
+----------------------------------------------------
 Twelve non-annualized daily IR proxies on the same scale as the gate's
 observed Sharpe (CS long/short portfolio return mean/std). Values are
 Grinold-style ``IC * sqrt(breadth)`` with breadth=50 (Phase-2 universe),
@@ -25,6 +25,22 @@ using the live IC / rank-IC figures recorded for each configuration:
 12. Momentum-breadth probe h=126                 rank_IC≈−0.042 → −0.297
 
 These are selection-bias inputs, not CPCV path diagnostics.
+
+``N_RESEARCH_TRIALS`` (conservative count for DSR)
+-------------------------------------------------
+Bailey DSR uses ``n_trials`` for the expected-max-SR null under selection bias.
+Counting only the 12 *logged* IC rows above understates the true multiple-testing
+burden (intermediate feature / horizon / universe probes that were tried but not
+written into the IC table).
+
+Documented configuration families (≥10 distinct trials):
+  Baseline, CA-Fix, Feature-Set #17, Sweep h=1/2/5/10/20, Mom-Breadth h=63/126
+plus the earlier diagnostics rows in the variance table (50-symbol validation,
+test_start bar-gap, pre-CA baseline) → 12 logged ICs.
+
+Round defensively **up** to ``N_RESEARCH_TRIALS = 15`` so DSR is not falsely
+optimistic. Variance still comes from the 12 logged Sharpes (dispersion of
+observed research outcomes); ``n_trials`` is the selection-bias headcount.
 """
 
 from __future__ import annotations
@@ -33,7 +49,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-# Exactly the 12 configurations counted by ``n_trials`` in the live gate scripts.
+# Logged IC→SR proxies for ``var_trial_sharpes`` (dispersion of known outcomes).
 RESEARCH_TRIAL_SHARPES: tuple[float, ...] = (
     0.075,
     0.071,
@@ -49,7 +65,9 @@ RESEARCH_TRIAL_SHARPES: tuple[float, ...] = (
     -0.297,
 )
 
-N_RESEARCH_TRIALS: int = len(RESEARCH_TRIAL_SHARPES)
+# Conservative selection-bias headcount for live gate scripts (see module doc).
+# Must be >= len(RESEARCH_TRIAL_SHARPES); must not track len() alone.
+N_RESEARCH_TRIALS: int = 15
 
 
 def variance_of_trial_sharpes(sharpes: Sequence[float]) -> float:
@@ -69,7 +87,14 @@ def variance_of_trial_sharpes(sharpes: Sequence[float]) -> float:
 
 def research_trial_sharpe_variance() -> float:
     """Variance of the documented Phase-2/3 research-trial Sharpe table."""
-    if len(RESEARCH_TRIAL_SHARPES) != N_RESEARCH_TRIALS:
-        msg = "RESEARCH_TRIAL_SHARPES length must equal N_RESEARCH_TRIALS"
+    if len(RESEARCH_TRIAL_SHARPES) < 2:
+        msg = "RESEARCH_TRIAL_SHARPES must contain at least 2 values"
+        raise RuntimeError(msg)
+    if N_RESEARCH_TRIALS < len(RESEARCH_TRIAL_SHARPES):
+        msg = (
+            "N_RESEARCH_TRIALS must be >= len(RESEARCH_TRIAL_SHARPES); "
+            "n_trials may round up for unlogged probes but must not undercount "
+            "the variance table"
+        )
         raise RuntimeError(msg)
     return variance_of_trial_sharpes(RESEARCH_TRIAL_SHARPES)
