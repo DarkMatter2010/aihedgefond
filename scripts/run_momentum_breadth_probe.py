@@ -8,7 +8,8 @@ Bindet bestehende Research-APIs:
   compute_ic_metrics, assemble_baseline_dataset.
 
 Survivorship-Hinweis: CANDIDATE_UNIVERSE ist die heutige S&P-500-nahe Liste
-(milder Survivorship-Bias). Jedes positive Ergebnis ist PROVISORISCH und muss
+(milder Survivorship-Bias). Continuity-Filter gilt as-of TRAIN_END (keine
+OOS-Look-Ahead-Selektion). Jedes positive Ergebnis ist PROVISORISCH und muss
 in Phase 3 unter CPCV/DSR bestätigt werden.
 """
 
@@ -64,6 +65,7 @@ FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "vol_63",
 )
 
+# fmt: off
 CANDIDATE_UNIVERSE: tuple[str, ...] = (
     "A", "AAPL", "ABBV", "ABNB", "ABT", "ACGL", "ACN", "ADBE",
     "ADI", "ADM", "ADP", "ADSK", "AEE", "AEP", "AES", "AFL",
@@ -129,6 +131,7 @@ CANDIDATE_UNIVERSE: tuple[str, ...] = (
     "WMT", "WRB", "WSM", "WST", "WTW", "WY", "WYNN", "XEL",
     "XOM", "XYL", "XYZ", "YUM", "ZBH", "ZBRA", "ZTS",
 )
+# fmt: on
 
 
 def _as_of_adjusted_close(bars: BarFrame, symbol: str) -> pd.Series:
@@ -292,15 +295,24 @@ def _download_universe(
         msg = f"reference calendar too short: {len(calendar)} bars"
         raise RuntimeError(msg)
 
+    # Continuity is evaluated as-of TRAIN_END only. Requiring unbroken closes
+    # through the OOS window would look ahead from the training decision point.
+    train_end_ts = pd.Timestamp(TRAIN_END, tz="UTC")
+    continuity_calendar = calendar[calendar <= train_end_ts]
+    if continuity_calendar.empty:
+        msg = "continuity calendar empty after as-of TRAIN_END restriction"
+        raise RuntimeError(msg)
+
     kept: list[str] = []
     for symbol, frame in collected_bars.items():
         if symbol == "SPY":
             # SPY is calendar reference only if it was injected; not in S&P list usually
             pass
-        if not _has_continuous_history(frame, calendar=calendar):
+        if not _has_continuous_history(frame, calendar=continuity_calendar):
             dropped.append(symbol)
             continue
-        # Trim to calendar so all frames share identical timestamps
+        # Trim to full research calendar so all frames share identical timestamps.
+        # OOS gaps remain NaN and are handled downstream (not a universe reject).
         collected_bars[symbol] = frame.reindex(calendar)
         collected_divs[symbol] = collected_divs[symbol].reindex(calendar, fill_value=0.0)
         collected_splits[symbol] = collected_splits[symbol].reindex(calendar, fill_value=0.0)
@@ -403,6 +415,13 @@ def run_one_horizon(
         min_cs_breadth_for_reliable_ic=min_cs_breadth_for_reliable_ic,
     )
     n_symbols = int(test.features.index.get_level_values("symbol").nunique())
+    test_timestamps = test.features.index.get_level_values("timestamp")
+    if len(test_timestamps) == 0:
+        msg = "test window has no timestamps after split/restrict"
+        raise ValueError(msg)
+    test_dates = pd.DatetimeIndex(test_timestamps).tz_convert("UTC").date
+    actual_test_start = min(test_dates)
+    actual_test_end = max(test_dates)
     return {
         "horizon": horizon,
         "embargo_days": embargo_days,
@@ -412,7 +431,7 @@ def run_one_horizon(
         "rank_icir": metrics.rank_icir,
         "n_symbols": n_symbols,
         "cross_section_width_median": metrics.median_cs_breadth,
-        "test_window": f"{TEST_START.isoformat()} → {TEST_WINDOW_END.isoformat()}",
+        "test_window": (f"{actual_test_start.isoformat()} → {actual_test_end.isoformat()}"),
         "train_end": TRAIN_END.isoformat(),
         "test_start": split_def.test_start.isoformat(),
         "train_rows": split_def.train_rows,
@@ -493,7 +512,7 @@ def main() -> None:
         frequency=settings.frequency,
     )
     print(f"candidates: {len(CANDIDATE_UNIVERSE)}")
-    print(f"kept after continuous-history + quality filter: {len(kept)}")
+    print(f"kept after continuous-history (as-of {TRAIN_END}) + quality filter: {len(kept)}")
     print(f"dropped: {len(dropped)}")
     print(
         "NOTE: milder Survivorship-Bias (heutige S&P-500-Mitglieder) — "
