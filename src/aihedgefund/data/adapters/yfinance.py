@@ -23,7 +23,12 @@ CANONICAL_COLUMNS = ("open", "high", "low", "close", "adj_close", "volume")
 
 
 class YFinanceProvider(MarketDataProvider):
-    """Download unadjusted Yahoo bars and normalize them into canonical frames."""
+    """Download Yahoo bars (split-continuous close) and normalize to canonical frames.
+
+    Uses ``auto_adjust=False`` so ``close`` stays split-adjusted but not
+    dividend-adjusted, while ``adj_close`` and raw action columns are retained.
+    Corporate-action price transforms must not re-apply split factors to ``close``.
+    """
 
     def __init__(
         self,
@@ -42,7 +47,7 @@ class YFinanceProvider(MarketDataProvider):
         self,
         request: MarketDataRequest,
     ) -> BarFrame:
-        """Fetch canonical UTC bars while preserving raw actions and both closes."""
+        """Fetch canonical UTC bars while preserving actions and both close columns."""
         symbols = request.symbols
         vendor_symbols = tuple(self._symbol_aliases.get(symbol, symbol) for symbol in symbols)
         raw = cast(
