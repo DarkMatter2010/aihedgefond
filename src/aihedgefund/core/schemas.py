@@ -297,7 +297,7 @@ class BarFrame(BoundaryDTO):
 
 
 class CorporateActionInput(BoundaryDTO):
-    """Aligned raw prices and action facts entering the pure CA transform."""
+    """Aligned vendor closes (split-continuous) and action facts for the CA transform."""
 
     model_config = ConfigDict(
         frozen=True,

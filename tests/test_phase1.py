@@ -455,8 +455,15 @@ def test_extreme_return_flag_keeps_bar_in_feature_output(
 
 
 def test_corporate_action_adjustment_handles_split_and_dividend_exactly() -> None:
+    """Vendor close is already split-continuous; only dividends rescale prices.
+
+    The previous fixture used an *unadjusted* close that halved on a 2:1 split
+    and asserted re-application of the split factor. That could not detect
+    Yahoo-style double-adjustment (continuous close × split → ≈log(split) jump).
+    """
     index = pd.date_range("2025-01-01", periods=4, freq="D", tz="UTC")
-    raw = pd.Series([100.0, 102.0, 51.0, 52.0], index=index)
+    # Yahoo-style: close already continuous across the 2:1 split event.
+    raw = pd.Series([100.0, 102.0, 103.0, 104.0], index=index)
     splits = pd.Series([0.0, 0.0, 2.0, 0.0], index=index)
     dividends = pd.Series(0.0, index=index)
 
@@ -464,9 +471,13 @@ def test_corporate_action_adjustment_handles_split_and_dividend_exactly() -> Non
         CorporateActionInput(raw_close=raw, splits=splits, dividends=dividends)
     )
 
-    assert adjusted.split_adjusted.loc[index[1]] == pytest.approx(102.0)
-    assert adjusted.split_adjusted.loc[index[2]] == pytest.approx(102.0)
-    assert adjusted.raw_close.loc[index[0]] == adjusted.split_adjusted.loc[index[0]]
+    assert adjusted.split_adjusted.tolist() == pytest.approx(raw.tolist())
+    assert adjusted.as_of_adjusted.tolist() == pytest.approx(raw.tolist())
+    split_day_logret = float(
+        np.log(adjusted.as_of_adjusted.loc[index[2]] / adjusted.as_of_adjusted.loc[index[1]])
+    )
+    assert abs(split_day_logret) < 0.05
+    assert abs(split_day_logret - float(np.log(2.0))) > 0.5
 
     dividend_raw = pd.Series([100.0, 99.0], index=index[:2])
     dividend = pd.Series([0.0, 1.0], index=index[:2])
@@ -479,6 +490,56 @@ def test_corporate_action_adjustment_handles_split_and_dividend_exactly() -> Non
     )
     assert dividend_adjusted.as_of_adjusted.iloc[0] == pytest.approx(100.0)
     assert dividend_adjusted.as_of_adjusted.iloc[1] == pytest.approx(100.0)
+
+
+def test_corporate_action_does_not_double_adjust_yahoo_style_split_close() -> None:
+    """Regression: continuous close + split event must not inject ≈log(split)."""
+    index = pd.date_range("2022-06-03", periods=3, freq="B", tz="UTC")
+    raw = pd.Series([122.35, 124.79, 123.00], index=index)
+    splits = pd.Series([0.0, 20.0, 0.0], index=index)
+    dividends = pd.Series(0.0, index=index)
+
+    adjusted = adjust_corporate_actions(
+        CorporateActionInput(raw_close=raw, splits=splits, dividends=dividends)
+    )
+    split_day_logret = float(
+        np.log(adjusted.as_of_adjusted.iloc[1] / adjusted.as_of_adjusted.iloc[0])
+    )
+    assert abs(split_day_logret) < 0.05
+    assert abs(split_day_logret - float(np.log(20.0))) > 2.0
+
+
+def test_amzn_20_for_1_split_log_return_stays_in_normal_range() -> None:
+    """Real AMZN 2022-06-06 20:1 prices: post-CA logret must not be ≈log(20)."""
+    index = pd.DatetimeIndex(
+        [
+            "2022-06-02",
+            "2022-06-03",
+            "2022-06-06",
+            "2022-06-07",
+            "2022-06-08",
+        ],
+        tz="UTC",
+    )
+    # Recorded Yahoo Close values (auto_adjust=False); already split-continuous.
+    raw = pd.Series(
+        [125.511002, 122.349998, 124.790001, 123.000000, 121.180000],
+        index=index,
+    )
+    splits = pd.Series([0.0, 0.0, 20.0, 0.0, 0.0], index=index)
+    dividends = pd.Series(0.0, index=index)
+
+    adjusted = adjust_corporate_actions(
+        CorporateActionInput(raw_close=raw, splits=splits, dividends=dividends)
+    )
+    split_ts = index[2]
+    prev_ts = index[1]
+    logret = float(
+        np.log(adjusted.as_of_adjusted.loc[split_ts] / adjusted.as_of_adjusted.loc[prev_ts])
+    )
+    assert abs(logret) < 0.10
+    assert abs(logret - float(np.log(20.0))) > 2.0
+    assert adjusted.as_of_adjusted.tolist() == pytest.approx(raw.tolist())
 
 
 def test_pit_join_never_selects_t_plus_one_sentinel() -> None:
@@ -551,9 +612,10 @@ def test_feature_pipeline_is_causal_and_produces_phase0_dtos() -> None:
     assert full.index.is_monotonic_increasing
 
 
-def test_feature_pipeline_explicitly_adjusts_a_split() -> None:
+def test_feature_pipeline_does_not_double_adjust_a_vendor_split() -> None:
+    """Flat Yahoo-style close with a split event must keep zero log-return."""
     index = pd.date_range("2025-01-01", periods=50, freq="D", tz="UTC")
-    close = np.r_[np.full(30, 100.0), np.full(20, 50.0)]
+    close = np.full(50, 100.0)
     frame = pd.DataFrame(
         {
             "open": close,
@@ -576,6 +638,7 @@ def test_feature_pipeline_explicitly_adjusts_a_split() -> None:
 
     assert matrix.loc[(index[30], "AAPL"), "log_return"] == pytest.approx(0.0)
     assert matrix.loc[(index[30], "AAPL"), "momentum_20"] == pytest.approx(0.0)
+    assert abs(float(matrix.loc[(index[30], "AAPL"), "log_return"]) - float(np.log(2.0))) > 0.5
 
 
 def test_future_corporate_action_cannot_change_past_features_or_labels() -> None:
