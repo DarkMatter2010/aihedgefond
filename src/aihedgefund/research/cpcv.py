@@ -14,9 +14,11 @@ Input dataset (via ``BaselineDataset``):
 
 Label end times ``t1``:
     For horizon ``h``, ``t1`` is the ``h``-th subsequent trading timestamp of the
-    same symbol (matching ``make_forward_return_labels``). When that bar is
-    missing, the row is hard-failed — the dataset must already drop incomplete
-    label windows.
+    same symbol (matching ``make_forward_return_labels``). Callers should pass
+    ``bar_timestamps`` — the full trading calendar *before* the final-horizon
+    feature drop — so ``t1`` resolves on real bars (including weekends/holidays
+    after the last labeled row). When that bar is missing, the row is
+    hard-failed — never extrapolated via median gaps.
 
 Output ``CPCVFold``:
     ``train_positions`` / ``test_positions`` are ``iloc`` positions into the
@@ -38,11 +40,18 @@ from aihedgefund.core.schemas import BaselineDataset, CPCVConfig, CPCVFold, CPCV
 def combinatorial_purged_splits(
     dataset: BaselineDataset,
     config: CPCVConfig,
+    *,
+    bar_timestamps: pd.DatetimeIndex | None = None,
 ) -> CPCVSplitResult:
     """Enumerate purged+embargoed CPCV folds for ``dataset``.
 
     Deterministic: block boundaries follow sorted unique timestamps; fold order
     follows ``itertools.combinations`` on block ids ``0..N-1``.
+
+    ``bar_timestamps`` is the full trading calendar used to resolve label end
+    times ``t1`` (typically all bar timestamps before dropping the final
+    ``horizon`` rows). When omitted, ``t1`` is resolved against the feature
+    index alone and hard-fails if ``ts[i + horizon]`` is absent.
     """
     if config.horizon != dataset.horizon:
         msg = (
@@ -81,7 +90,11 @@ def combinatorial_purged_splits(
         raise ValueError(msg)
 
     block_ids = _assign_contiguous_blocks(n_timestamps, config.n_blocks)
-    t1_by_row = _label_end_times(features.index, horizon=config.horizon)
+    t1_by_row = _label_end_times(
+        features.index,
+        horizon=config.horizon,
+        bar_timestamps=bar_timestamps,
+    )
     row_timestamps = pd.DatetimeIndex(features.index.get_level_values("timestamp"))
 
     folds: list[CPCVFold] = []
@@ -182,38 +195,61 @@ def _assign_contiguous_blocks(n_timestamps: int, n_blocks: int) -> np.ndarray:
     return block_ids
 
 
-def _label_end_times(index: pd.MultiIndex, *, horizon: int) -> pd.DatetimeIndex:
+def _label_end_times(
+    index: pd.MultiIndex,
+    *,
+    horizon: int,
+    bar_timestamps: pd.DatetimeIndex | None = None,
+) -> pd.DatetimeIndex:
     """Compute ``t1`` per row: the ``horizon``-th next bar of the same symbol.
 
-    The labeled dataset already drops incomplete forward windows, so the true
-    realization bar may sit past the last in-sample timestamp. When
-    ``ts[i + horizon]`` is unavailable, ``t1`` is extrapolated as
-    ``ts[i] + horizon * median_bar_gap`` for that symbol (deterministic).
+    When ``bar_timestamps`` is provided, ``t1`` is taken from that trading
+    calendar (the bar index before dropping incomplete forward windows).
+    Otherwise the feature-index timestamps are used. Missing
+    ``calendar[i + horizon]`` is always a hard ``ValueError`` — never a
+    median-gap extrapolation.
     """
+    if horizon < 1:
+        msg = "horizon must be >= 1"
+        raise ValueError(msg)
+
+    shared_calendar: pd.DatetimeIndex | None = None
+    if bar_timestamps is not None:
+        shared_calendar = pd.DatetimeIndex(bar_timestamps).unique().sort_values()
+        if len(shared_calendar) == 0:
+            msg = "bar_timestamps must be non-empty"
+            raise ValueError(msg)
+
     t1_maps: dict[str, dict[pd.Timestamp, pd.Timestamp]] = {}
     for symbol in index.get_level_values("symbol").unique():
         symbol_key = str(symbol)
-        unique_ts = pd.DatetimeIndex(
+        feature_ts = pd.DatetimeIndex(
             index.get_level_values("timestamp")[
                 index.get_level_values("symbol") == symbol
             ]
         ).unique().sort_values()
-        if len(unique_ts) < 2:
-            msg = f"{symbol}: need at least 2 timestamps to form label ends"
+        if len(feature_ts) < 1:
+            msg = f"{symbol}: need at least 1 feature timestamp"
             raise ValueError(msg)
-        gaps = unique_ts.to_series().diff().iloc[1:].dt.total_seconds()
-        median_gap = pd.Timedelta(seconds=float(gaps.median()))
-        if median_gap <= pd.Timedelta(0):
-            msg = f"{symbol}: non-positive median bar gap"
-            raise ValueError(msg)
+        calendar = shared_calendar if shared_calendar is not None else feature_ts
+        pos_by_ts = {pd.Timestamp(ts): i for i, ts in enumerate(calendar)}
         mapping: dict[pd.Timestamp, pd.Timestamp] = {}
-        for i, stamp in enumerate(unique_ts):
+        for stamp in feature_ts:
             key = pd.Timestamp(stamp)
-            end_i = i + horizon
-            if end_i < len(unique_ts):
-                mapping[key] = pd.Timestamp(unique_ts[end_i])
-            else:
-                mapping[key] = key + horizon * median_gap
+            try:
+                start_i = pos_by_ts[key]
+            except KeyError as exc:
+                msg = f"{symbol}: feature timestamp {key} missing from bar calendar"
+                raise ValueError(msg) from exc
+            end_i = start_i + horizon
+            if end_i >= len(calendar):
+                msg = (
+                    f"{symbol}: missing t1 bar for timestamp {key} "
+                    f"(need calendar[{start_i}+{horizon}], calendar length "
+                    f"{len(calendar)})"
+                )
+                raise ValueError(msg)
+            mapping[key] = pd.Timestamp(calendar[end_i])
         t1_maps[symbol_key] = mapping
 
     t1_ordered: list[pd.Timestamp] = []

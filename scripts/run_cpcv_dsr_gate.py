@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, time
 
+import pandas as pd
+
 from aihedgefund.core.bus import InProcessMessageBus
 from aihedgefund.core.config import load_settings
 from aihedgefund.core.runtime import FrozenClock
@@ -83,6 +85,11 @@ def main() -> None:
         horizon=HORIZON,
         feature_columns=FEATURE_COLUMNS,
     )
+    # Full trading calendar before the final-horizon label drop — required so
+    # CPCV resolves t1 on real bars instead of median-gap extrapolation.
+    bar_timestamps = pd.DatetimeIndex(
+        sorted({ts for frame in bars.bars.values() for ts in frame.index})
+    )
 
     params = build_lgbm_params(
         seed=SEED,
@@ -110,6 +117,7 @@ def main() -> None:
         start=settings.start,
         end=settings.end,
         frequency=settings.frequency,
+        bar_timestamps=bar_timestamps,
     )
 
     print(f"candidate: horizon={HORIZON} seed={SEED} n_symbols={len(bars.bars)}")

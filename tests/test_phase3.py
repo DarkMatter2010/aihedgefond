@@ -12,7 +12,11 @@ from pydantic import ValidationError
 
 from aihedgefund.core.schemas import BaselineDataset, CPCVConfig
 from aihedgefund.research.baseline import build_lgbm_params
-from aihedgefund.research.cpcv import combinatorial_purged_splits, subset_by_positions
+from aihedgefund.research.cpcv import (
+    _label_end_times,
+    combinatorial_purged_splits,
+    subset_by_positions,
+)
 from aihedgefund.research.deflated_sharpe import (
     deflated_sharpe,
     deflated_sharpe_from_moments,
@@ -31,11 +35,15 @@ def _mini_dataset(
     n_symbols: int = 4,
     horizon: int = HORIZON,
     seed: int = SEED,
-) -> BaselineDataset:
-    """Build a tiny deterministic BaselineDataset for CPCV unit tests."""
+) -> tuple[BaselineDataset, pd.DatetimeIndex]:
+    """Build a tiny deterministic BaselineDataset plus its bar calendar.
+
+    Features/labels cover ``dates[:-horizon]`` (matching
+    ``make_forward_return_labels``); the returned calendar keeps the trailing
+    realization bars so CPCV can resolve true ``t1`` without extrapolation.
+    """
     rng = np.random.default_rng(seed)
     dates = pd.date_range("2024-01-02", periods=n_days, freq="B", tz="UTC")
-    # Keep enough trailing room so label ends are mostly in-calendar.
     usable = dates[: n_days - horizon]
     rows: list[tuple[pd.Timestamp, str]] = []
     feat_rows: list[list[float]] = []
@@ -54,12 +62,33 @@ def _mini_dataset(
     label = pd.Series(labels, index=index, dtype="float64", name=f"forward_return_{horizon}")
     features = features.sort_index()
     label = label.loc[features.index]
-    return BaselineDataset(
+    dataset = BaselineDataset(
         features=features,
         label=label,
         horizon=horizon,
         feature_columns=feature_columns,
     )
+    return dataset, pd.DatetimeIndex(dates)
+
+
+def _true_t1_map(
+    feature_index: pd.MultiIndex,
+    bar_calendar: pd.DatetimeIndex,
+    *,
+    horizon: int,
+) -> pd.DatetimeIndex:
+    """Independent t1 oracle: horizon-th next bar on the explicit calendar."""
+    calendar = pd.DatetimeIndex(bar_calendar).unique().sort_values()
+    pos = {pd.Timestamp(ts): i for i, ts in enumerate(calendar)}
+    out: list[pd.Timestamp] = []
+    for ts, _symbol in zip(
+        feature_index.get_level_values("timestamp"),
+        feature_index.get_level_values("symbol"),
+        strict=True,
+    ):
+        start_i = pos[pd.Timestamp(ts)]
+        out.append(pd.Timestamp(calendar[start_i + horizon]))
+    return pd.DatetimeIndex(out)
 
 
 def test_cpcv_config_hard_fails_when_k_ge_n() -> None:
@@ -69,35 +98,120 @@ def test_cpcv_config_hard_fails_when_k_ge_n() -> None:
 
 
 def test_purge_removes_label_overlapping_train_samples() -> None:
-    """Purge drops train rows whose [t0, t1] overlaps the test span."""
-    dataset = _mini_dataset(n_days=40, n_symbols=2, horizon=2)
+    """Purge drops train rows whose [t0, t1] overlaps the test span.
+
+    t1 is asserted against an independent weekend-aware bar calendar — not
+    against ``_label_end_times`` — so underestimation cannot hide.
+    """
+    # Calendar with an explicit Sat/Sun gap after a Thursday feature row.
+    # True t1 for Thu with horizon=2 is Monday; median-gap extrapolation
+    # would wrongly land on Saturday and miss Monday-overlapping purge.
+    bar_calendar = pd.DatetimeIndex(
+        [
+            "2024-01-02",  # Tue
+            "2024-01-03",  # Wed
+            "2024-01-04",  # Thu
+            "2024-01-05",  # Fri
+            # weekend gap
+            "2024-01-08",  # Mon
+            "2024-01-09",  # Tue
+            "2024-01-10",  # Wed
+            "2024-01-11",  # Thu
+            "2024-01-12",  # Fri
+            "2024-01-15",  # Mon
+            "2024-01-16",  # Tue
+            "2024-01-17",  # Wed
+            "2024-01-18",  # Thu
+            "2024-01-19",  # Fri
+            "2024-01-22",  # Mon (trailing realization bars)
+            "2024-01-23",  # Tue
+        ],
+        tz="UTC",
+    )
+    labeled_ts = bar_calendar[:-HORIZON]
+    rows: list[tuple[pd.Timestamp, str]] = []
+    feat_rows: list[list[float]] = []
+    labels: list[float] = []
+    for symbol in ("S0", "S1"):
+        for i, ts in enumerate(labeled_ts):
+            rows.append((ts, symbol))
+            feat_rows.append([float(i), float(i % 3)])
+            labels.append(0.01 * (i + 1))
+    index = pd.MultiIndex.from_tuples(rows, names=("timestamp", "symbol"))
+    features = pd.DataFrame(
+        feat_rows, index=index, columns=["f0", "f1"], dtype="float64"
+    ).sort_index()
+    label = pd.Series(
+        labels, index=index, dtype="float64", name="forward_return_2"
+    ).loc[features.index]
+    dataset = BaselineDataset(
+        features=features,
+        label=label,
+        horizon=HORIZON,
+        feature_columns=("f0", "f1"),
+    )
     config = CPCVConfig(n_blocks=4, n_test_blocks=1, embargo_days=2, horizon=2)
-    result = combinatorial_purged_splits(dataset, config)
+    result = combinatorial_purged_splits(
+        dataset, config, bar_timestamps=bar_calendar
+    )
 
-    features = dataset.features.sort_index()
     row_ts = pd.DatetimeIndex(features.index.get_level_values("timestamp"))
-    # Reconstruct t1 the same way CPCV does for the assert.
-    from aihedgefund.research.cpcv import _label_end_times
-
-    t1 = _label_end_times(features.index, horizon=2)
+    t1 = _true_t1_map(features.index, bar_calendar, horizon=2)
+    # Spot-check: Thu 2024-01-04 + horizon=2 → Mon 2024-01-08 (not Sat).
+    thu = pd.Timestamp("2024-01-04", tz="UTC")
+    thu_positions = [i for i, ts in enumerate(row_ts) if ts == thu]
+    assert thu_positions
+    for pos in thu_positions:
+        assert t1[pos] == pd.Timestamp("2024-01-08", tz="UTC")
 
     for fold in result.folds:
         test_ts = row_ts[list(fold.test_positions)]
         test_min, test_max = test_ts.min(), test_ts.max()
         train_pos = list(fold.train_positions)
-        # No surviving train row may overlap the test span via its label window.
         for pos in train_pos:
             assert not (row_ts[pos] <= test_max and t1[pos] >= test_min), (
                 f"fold {fold.fold_id}: train row {pos} overlaps test "
                 f"[{test_min}, {test_max}] via t1={t1[pos]}"
             )
-        # And at least one row was purged on interior folds (constructed so
-        # horizon>0 forces overlap near block edges).
-        assert fold.purged_train_count >= 0
-        # Constructed case: with horizon=2, interior folds must purge the
-        # pre-test label windows that would otherwise leak into training.
         if min(fold.test_block_ids) > 0:
             assert fold.purged_train_count > 0
+
+
+def test_purge_non_adjacent_test_blocks() -> None:
+    """Purge is evaluated per contiguous test run (n_test_blocks=2, gaps ok)."""
+    dataset, bar_calendar = _mini_dataset(n_days=48, n_symbols=2, horizon=2)
+    config = CPCVConfig(n_blocks=6, n_test_blocks=2, embargo_days=2, horizon=2)
+    result = combinatorial_purged_splits(
+        dataset, config, bar_timestamps=bar_calendar
+    )
+    assert result.n_folds == 15  # C(6, 2)
+    features = dataset.features.sort_index()
+    row_ts = pd.DatetimeIndex(features.index.get_level_values("timestamp"))
+    t1 = _true_t1_map(features.index, bar_calendar, horizon=2)
+    non_adjacent = [
+        f for f in result.folds if f.test_block_ids[1] - f.test_block_ids[0] > 1
+    ]
+    assert non_adjacent, "expected at least one non-adjacent test-block fold"
+    timestamps = pd.DatetimeIndex(row_ts.unique()).sort_values()
+    n = len(timestamps)
+    base, rem = divmod(n, config.n_blocks)
+    sizes = [base + (1 if i < rem else 0) for i in range(config.n_blocks)]
+    block_ids = np.repeat(np.arange(config.n_blocks), sizes)
+    for fold in non_adjacent:
+        is_test = np.isin(block_ids, list(fold.test_block_ids))
+        padded = np.concatenate(([False], is_test.astype(bool), [False]))
+        diffs = np.diff(padded.astype(int))
+        starts = np.flatnonzero(diffs == 1)
+        ends = np.flatnonzero(diffs == -1)
+        train_set = set(fold.train_positions)
+        for start, end in zip(starts, ends, strict=True):
+            run_ts = timestamps[start:end]
+            test_min, test_max = run_ts.min(), run_ts.max()
+            for pos in train_set:
+                assert not (row_ts[pos] <= test_max and t1[pos] >= test_min), (
+                    f"fold {fold.fold_id}: train {pos} overlaps run "
+                    f"[{test_min}, {test_max}]"
+                )
 
 
 def test_embargo_zone_boundaries() -> None:
@@ -107,7 +221,7 @@ def test_embargo_zone_boundaries() -> None:
     Saturday, so Monday stays in train. Trading-bar embargo must drop Monday
     when ``embargo_days >= 1``.
     """
-    dataset = _mini_dataset(n_days=50, n_symbols=2, horizon=2)
+    dataset, bar_calendar = _mini_dataset(n_days=50, n_symbols=2, horizon=2)
     embargo_days = 5
     config = CPCVConfig(
         n_blocks=5,
@@ -115,7 +229,9 @@ def test_embargo_zone_boundaries() -> None:
         embargo_days=embargo_days,
         horizon=2,
     )
-    result = combinatorial_purged_splits(dataset, config)
+    result = combinatorial_purged_splits(
+        dataset, config, bar_timestamps=bar_calendar
+    )
     features = dataset.features.sort_index()
     row_ts = pd.DatetimeIndex(features.index.get_level_values("timestamp"))
     timestamps = pd.DatetimeIndex(row_ts.unique()).sort_values()
@@ -144,7 +260,6 @@ def test_embargo_zone_boundaries() -> None:
                 )
                 assert fold.embargoed_train_count > 0
 
-        # Friday → Monday: next trading bar after Friday must be embargoed.
         if test_end.dayofweek == 4 and embargo_start < len(timestamps):
             monday = timestamps[embargo_start]
             assert monday.dayofweek == 0, (
@@ -166,9 +281,40 @@ def test_embargo_zone_boundaries() -> None:
     )
 
 
+def test_label_end_times_hard_fails_without_extrapolation() -> None:
+    """Missing t1 bar hard-fails; median-gap extrapolation is not used."""
+    index = pd.MultiIndex.from_product(
+        [
+            pd.DatetimeIndex(
+                ["2024-01-04", "2024-01-05"],  # Thu, Fri — no Mon in index
+                tz="UTC",
+            ),
+            ["S0"],
+        ],
+        names=("timestamp", "symbol"),
+    )
+    with pytest.raises(ValueError, match="missing t1 bar"):
+        _label_end_times(index, horizon=2)
+
+    calendar = pd.DatetimeIndex(
+        [
+            "2024-01-04",
+            "2024-01-05",
+            "2024-01-08",  # Mon
+            "2024-01-09",  # Tue
+        ],
+        tz="UTC",
+    )
+    t1 = _label_end_times(index, horizon=2, bar_timestamps=calendar)
+    assert list(t1) == [
+        pd.Timestamp("2024-01-08", tz="UTC"),
+        pd.Timestamp("2024-01-09", tz="UTC"),
+    ]
+
+
 def test_gate_hard_fails_on_undefined_path_sharpe(monkeypatch: pytest.MonkeyPatch) -> None:
     """Undefined path Sharpe (<2 obs or zero variance) must hard-fail, not default to 0."""
-    dataset = _mini_dataset(n_days=40, n_symbols=4, horizon=2, seed=SEED)
+    dataset, bar_calendar = _mini_dataset(n_days=40, n_symbols=4, horizon=2, seed=SEED)
     config = CPCVConfig(n_blocks=3, n_test_blocks=1, embargo_days=2, horizon=2)
     params = build_lgbm_params(
         seed=SEED,
@@ -190,6 +336,7 @@ def test_gate_hard_fails_on_undefined_path_sharpe(monkeypatch: pytest.MonkeyPatc
         start=date(2024, 1, 2),
         end=date(2024, 3, 29),
         frequency="1d",
+        bar_timestamps=bar_calendar,
     )
 
     def _zero_variance_returns(
@@ -231,6 +378,7 @@ def test_gate_hard_fails_on_undefined_path_sharpe(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(ValueError, match=r"fold \d+: path Sharpe undefined"):
         run_overfitting_gate(**kwargs)
 
+
 def test_dsr_matches_bailey_lopez_de_prado_2014_example() -> None:
     """Sanity-check DSR against the published numerical example.
 
@@ -261,7 +409,6 @@ def test_dsr_matches_bailey_lopez_de_prado_2014_example() -> None:
     )
     assert report_46.dsr == pytest.approx(0.9505, abs=5e-4)
 
-    # expected_max_sharpe hard-fails on invalid n_trials.
     with pytest.raises(ValueError, match="n_trials"):
         expected_max_sharpe(1, 0.01)
 
@@ -269,7 +416,6 @@ def test_dsr_matches_bailey_lopez_de_prado_2014_example() -> None:
 def test_pure_noise_strategy_dsr_leq_zero() -> None:
     """A strongly losing noise series must yield DSR <= 0 (gate rejects)."""
     rng = np.random.default_rng(SEED)
-    # Large negative drift → SR* << 0 << SR0 → Φ underflows to 0.0.
     returns = rng.normal(loc=-0.05, scale=0.01, size=800)
     report = deflated_sharpe(returns, n_trials=12, var_trial_sharpes=0.002)
     assert report.dsr <= 0.0
@@ -310,7 +456,7 @@ def test_scores_to_strategy_returns_schema() -> None:
 
 def test_gate_verdict_schema_and_reproducibility() -> None:
     """Full gate returns a validated GateVerdict and is seed-stable."""
-    dataset = _mini_dataset(n_days=80, n_symbols=4, horizon=2, seed=SEED)
+    dataset, bar_calendar = _mini_dataset(n_days=80, n_symbols=4, horizon=2, seed=SEED)
     config = CPCVConfig(n_blocks=4, n_test_blocks=1, embargo_days=2, horizon=2)
     params = build_lgbm_params(
         seed=SEED,
@@ -332,6 +478,7 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
         start=date(2024, 1, 2),
         end=date(2024, 4, 30),
         frequency="1d",
+        bar_timestamps=bar_calendar,
     )
     first = run_overfitting_gate(**kwargs)
     second = run_overfitting_gate(**kwargs)
@@ -346,9 +493,11 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
 
 def test_subset_by_positions_preserves_schema() -> None:
     """iloc subsetting keeps BaselineDataset invariants."""
-    dataset = _mini_dataset(n_days=30, n_symbols=2)
+    dataset, bar_calendar = _mini_dataset(n_days=30, n_symbols=2)
     config = CPCVConfig(n_blocks=3, n_test_blocks=1, embargo_days=2, horizon=2)
-    fold = combinatorial_purged_splits(dataset, config).folds[0]
+    fold = combinatorial_purged_splits(
+        dataset, config, bar_timestamps=bar_calendar
+    ).folds[0]
     train = subset_by_positions(dataset, fold.train_positions)
     assert train.horizon == dataset.horizon
     assert train.feature_columns == dataset.feature_columns

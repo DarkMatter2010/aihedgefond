@@ -85,12 +85,16 @@ def run_overfitting_gate(
     start: date,
     end: date,
     frequency: str,
+    bar_timestamps: pd.DatetimeIndex | None = None,
 ) -> GateVerdict:
     """Train per CPCV fold, score OOS paths, and emit a DSR gate verdict.
 
     ``n_trials`` is the number of independent configurations explored in the
     research process (not the number of CPCV folds). Path-Sharpe variance
     estimates ``var_trial_sharpes`` for the SR0 term.
+
+    ``bar_timestamps`` is forwarded to CPCV for label-end resolution (full
+    trading calendar before the final-horizon feature drop).
     """
     if n_trials < 2:
         msg = "n_trials must be >= 2"
@@ -107,7 +111,9 @@ def run_overfitting_gate(
         feature_columns=dataset.feature_columns,
     )
 
-    split = combinatorial_purged_splits(dataset, cpcv_config)
+    split = combinatorial_purged_splits(
+        dataset, cpcv_config, bar_timestamps=bar_timestamps
+    )
     path_results: list[GatePathResult] = []
     path_return_series: list[pd.Series] = []
 
