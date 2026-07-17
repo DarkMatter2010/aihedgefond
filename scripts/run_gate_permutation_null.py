@@ -221,9 +221,18 @@ def main() -> None:
             "GATE_BROKEN: null DSR 95% quantile is >= 0.90 — "
             "gate still passes noise; do NOT release Slice 2"
         )
-    verdict = "JA" if beats_null and not null_broken else "NEIN"
+    # Slice-2 handoff: must clear Bailey confidence (dsr >= 0.95) AND beat the
+    # permutation null. Beating a near-zero null with dsr≪0.95 is not a pass.
+    gate_confident = real_dsr >= 0.95
+    print(f"gate_dsr_ge_0.95: {gate_confident}")
+    verdict = "JA" if (beats_null and gate_confident and not null_broken) else "NEIN"
     print(f"corrected_verdict: {verdict}")
     print(f"slice2_handoff: {'RELEASE' if verdict == 'JA' else 'BLOCKED'}")
+    if beats_null and not gate_confident:
+        print(
+            "handoff_note: real DSR beats null 95% numerically but absolute "
+            f"DSR={real_dsr:.3g} << 0.95 — Bailey gate NEIN; Slice 2 blocked"
+        )
 
 
 if __name__ == "__main__":
