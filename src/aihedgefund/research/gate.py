@@ -22,7 +22,9 @@ series. Path Sharpes remain diagnostics only (``path_sharpe_mean`` /
 real research-trial Sharpes (see ``research.trial_meta``) — never from CPCV
 path variance. ``SR̂`` and ``SR0`` share the non-annualized scale.
 
-Verdict rule (hard): ``JA`` iff ``dsr > 0``, else ``NEIN``.
+Verdict rule (hard): ``JA`` iff ``dsr >= 0.95``, else ``NEIN``.
+``dsr`` is Φ(z); a ``> 0`` threshold is vacuous for finite z and was part of
+the false-positive path that rubber-stamped near-noise candidates.
 """
 
 from __future__ import annotations
@@ -223,7 +225,7 @@ def run_overfitting_gate(
         var_trial_sharpes=var_trial_sharpes,
     )
     return GateVerdict(
-        verdict="JA" if deflated.dsr > 0.0 else "NEIN",
+        verdict="JA" if deflated.dsr >= 0.95 else "NEIN",
         dsr=deflated.dsr,
         n_trials=n_trials,
         path_sharpe_mean=path_mean,

@@ -526,7 +526,7 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
     first = run_overfitting_gate(**kwargs)
     second = run_overfitting_gate(**kwargs)
     assert first.verdict in {"JA", "NEIN"}
-    assert first.verdict == ("JA" if first.dsr > 0.0 else "NEIN")
+    assert first.verdict == ("JA" if first.dsr >= 0.95 else "NEIN")
     assert first.n_trials == 12
     assert first.cpcv.n_folds == 4
     assert first.dsr == second.dsr
@@ -619,7 +619,7 @@ def test_known_noise_gate_dsr_below_threshold_via_real_aggregation() -> None:
     # Research-trial SR0 must be strictly positive for the documented trials.
     assert verdict.deflated.sr0 > 0.0
     assert verdict.dsr < 0.5
-    assert verdict.verdict == ("JA" if verdict.dsr > 0.0 else "NEIN")
+    assert verdict.verdict == "NEIN"
 
 
 def test_subset_by_positions_preserves_schema() -> None:

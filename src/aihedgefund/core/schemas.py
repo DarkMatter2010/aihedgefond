@@ -854,7 +854,13 @@ class GatePathResult(BoundaryDTO):
 
 
 class GateVerdict(BoundaryDTO):
-    """Phase-3 overfitting gate: DSR > 0 → JA, otherwise NEIN."""
+    """Phase-3 overfitting gate: DSR >= 0.95 → JA, otherwise NEIN.
+
+    ``dsr`` is Φ(z) from Bailey & López de Prado (2014). The 0.95 threshold
+    is the conventional confidence level that the true SR exceeds 0 after
+    selection-bias deflation. ``dsr > 0`` is not used — Φ(z) is almost always
+    strictly positive for finite z and would rubber-stamp near-noise signals.
+    """
 
     verdict: Literal["JA", "NEIN"]
     dsr: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
@@ -869,8 +875,8 @@ class GateVerdict(BoundaryDTO):
 
     @model_validator(mode="after")
     def verdict_must_match_dsr(self) -> GateVerdict:
-        """Hard-bind JA/NEIN to the DSR > 0 rule."""
-        expected: Literal["JA", "NEIN"] = "JA" if self.dsr > 0.0 else "NEIN"
+        """Hard-bind JA/NEIN to the DSR >= 0.95 rule."""
+        expected: Literal["JA", "NEIN"] = "JA" if self.dsr >= 0.95 else "NEIN"
         if self.verdict != expected:
             msg = f"verdict {self.verdict!r} inconsistent with dsr={self.dsr}"
             raise ValueError(msg)

@@ -163,7 +163,7 @@ def main() -> None:
     print(f"execution_stack_release: {'YES' if verdict.verdict == 'JA' else 'NO'}")
     print(
         "note: Slice-2 handoff also requires DSR > permutation-null 95% "
-        "(see scripts/run_gate_permutation_null.py)"
+        "(see scripts/run_gate_permutation_null.py); gate JA requires dsr>=0.95"
     )
 
 
