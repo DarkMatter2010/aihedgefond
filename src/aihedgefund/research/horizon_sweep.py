@@ -143,7 +143,14 @@ def evaluate_horizon(
         horizon=research.horizon,
     )
 
-    hyperparams = build_hyperparams(research)
+    hyperparams = {
+        **build_hyperparams(research),
+        # Identity fields so each horizon gets a unique model_hash; without them
+        # FilesystemModelArtifactAdapter.load() hard-fails on ambiguous hash matches.
+        "horizon": research.horizon,
+        "embargo_days": research.embargo_days,
+        "test_start": research.test_start.isoformat(),
+    }
     model_hash = compute_model_hash(
         features=FEATURE_COLUMNS,
         hyperparameters=hyperparams,
@@ -153,10 +160,10 @@ def evaluate_horizon(
         frequency=horizon_settings.frequency,
         seed=research.seed,
     )
-    # strategy_id distinguishes otherwise-identical hyperparam hashes across horizons.
+    _train_exclude = {"num_boost_round", "horizon", "embargo_days", "test_start"}
     model = train_baseline(
         train,
-        params={k: v for k, v in hyperparams.items() if k != "num_boost_round"},
+        params={k: v for k, v in hyperparams.items() if k not in _train_exclude},
         num_boost_round=research.num_boost_round,
     )
     predictions = predict_scores(model, test.features, model_hash=model_hash)

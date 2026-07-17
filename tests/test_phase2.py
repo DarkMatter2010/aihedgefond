@@ -886,3 +886,45 @@ def test_horizon_sweep_rejects_duplicate_horizons(tmp_path: Path) -> None:
             created_at=CREATED_AT,
             persist_artifact=False,
         )
+
+
+def test_horizon_sweep_persisted_artifacts_have_unique_loadable_hashes(
+    tmp_path: Path,
+) -> None:
+    """Horizons must not share model_hash (adapter load hard-fails on ambiguity)."""
+    from aihedgefund.research.horizon_sweep import run_horizon_sweep
+
+    settings = phase2_settings(tmp_path)
+    bars = multi_symbol_bars()
+    features = FeaturePipeline(InProcessMessageBus()).compute(bars)
+    adapter = FilesystemModelArtifactAdapter(settings.artifact_root)
+
+    report = run_horizon_sweep(
+        bars,
+        features,
+        settings,
+        horizons=(1, 2),
+        artifact_adapter=adapter,
+        created_at=CREATED_AT,
+        persist_artifact=True,
+    )
+    assert [row.horizon for row in report.rows] == [1, 2]
+
+    sidecar_paths = sorted(
+        (settings.artifact_root / "models").glob("*/*/phase2_sidecar.json")
+    )
+    assert len(sidecar_paths) == 2
+    hashes = [
+        load_sidecar(path.parent).model_hash for path in sidecar_paths
+    ]
+    assert len(set(hashes)) == 2
+
+    for model_hash in hashes:
+        loaded = adapter.load(model_hash)
+        assert loaded.metadata.model_hash == model_hash
+        booster, meta = adapter.load_booster(model_hash)
+        assert meta.model_hash == model_hash
+        assert tuple(booster.feature_name()) == FEATURE_COLUMNS
+        assert "horizon" in meta.hyperparameters
+        assert "embargo_days" in meta.hyperparameters
+        assert "test_start" in meta.hyperparameters
