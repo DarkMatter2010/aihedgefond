@@ -210,6 +210,7 @@ def main() -> None:
     percentile = float(100.0 * np.mean(null_arr < real_dsr))
     beats_null = real_dsr > q95
     null_broken = q95 >= 0.9
+    gate_ja = real_dsr >= 0.95
 
     print("--- permutation null ---")
     print(f"null_dsr_q50: {q50}")
@@ -219,12 +220,16 @@ def main() -> None:
     print(f"real_dsr: {real_dsr}")
     print(f"real_percentile_vs_null: {percentile:.2f}")
     print(f"beats_null_q95: {beats_null}")
+    print(f"gate_dsr_ge_0_95: {gate_ja}")
     if null_broken:
         print(
             "GATE_BROKEN: null DSR 95% quantile is already >= 0.9 — "
             "selection-bias correction still inflated"
         )
-    corrected_verdict = "JA" if beats_null and not null_broken else "NEIN"
+    # JA only if absolute Bailey confidence clears 0.95 AND beats the null.
+    corrected_verdict = (
+        "JA" if gate_ja and beats_null and not null_broken else "NEIN"
+    )
     print(f"corrected_verdict: {corrected_verdict}")
     print(
         "handoff_slice2_execution: "
