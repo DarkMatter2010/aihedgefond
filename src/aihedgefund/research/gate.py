@@ -2,7 +2,25 @@
 
 Orchestrates a candidate model through combinatorial purged CV, converts each
 OOS fold into cross-sectional long/short strategy returns, aggregates path
-Sharpes, and applies DSR with an explicit ``n_trials`` (configuration count).
+returns into one series, and applies DSR with an explicit ``n_trials`` and
+``var_trial_sharpes`` from the independent research configurations.
+
+Aggregation approach (overlap-aware)
+------------------------------------
+CPCV paths are **not** independent: training windows overlap and the same
+timestamp can appear in multiple test folds. Treating the C(N,k) path Sharpes
+as an iid sample for SR estimation error (or for ``var_trial_sharpes``) is
+incorrect and produced a false-positive DSR≈0.94 on near-noise signals.
+
+Chosen approach: concatenate all OOS path return series and take the mean at
+each timestamp → **one** return series. Compute **one** non-annualized Sharpe
+whose ``T`` equals the number of unique OOS return observations in that
+series. Path Sharpes remain diagnostics only (``path_sharpe_mean`` /
+``path_sharpe_std``).
+
+``var_trial_sharpes`` must be supplied by the caller from the variance of the
+real research-trial Sharpes (see ``research.trial_meta``) — never from CPCV
+path variance. ``SR̂`` and ``SR0`` share the non-annualized scale.
 
 Verdict rule (hard): ``JA`` iff ``dsr > 0``, else ``NEIN``.
 """
@@ -73,6 +91,30 @@ def scores_to_strategy_returns(
     )
 
 
+def aggregate_cpcv_path_returns(path_returns: Sequence[pd.Series]) -> pd.Series:
+    """Merge overlapping CPCV OOS path returns into one evaluation series.
+
+    Concatenate all path series and take the mean at each timestamp. The
+    resulting length ``T`` is the number of unique OOS return observations —
+    the correct sample length for DSR, not the CPCV fold count.
+
+    Hard-fails on empty input or a result with fewer than 2 observations.
+    """
+    if not path_returns:
+        msg = "path_returns must be non-empty"
+        raise ValueError(msg)
+    concatenated = pd.concat(list(path_returns)).sort_index()
+    merged = concatenated.groupby(level=0).mean()
+    merged.name = "strategy_return"
+    if len(merged) < 2:
+        msg = (
+            f"aggregated OOS returns need >= 2 observations for Sharpe/DSR, "
+            f"got {len(merged)}"
+        )
+        raise ValueError(msg)
+    return merged
+
+
 def run_overfitting_gate(
     dataset: BaselineDataset,
     *,
@@ -80,6 +122,7 @@ def run_overfitting_gate(
     model_params: Mapping[str, Any],
     num_boost_round: int,
     n_trials: int,
+    var_trial_sharpes: float,
     seed: int,
     universe: Sequence[str],
     start: date,
@@ -90,14 +133,20 @@ def run_overfitting_gate(
     """Train per CPCV fold, score OOS paths, and emit a DSR gate verdict.
 
     ``n_trials`` is the number of independent configurations explored in the
-    research process (not the number of CPCV folds). Path-Sharpe variance
-    estimates ``var_trial_sharpes`` for the SR0 term.
+    research process (not the number of CPCV folds).
+
+    ``var_trial_sharpes`` is the variance of those research-trial
+    non-annualized Sharpes (see ``research.trial_meta``). It must **not** be
+    derived from CPCV path Sharpe dispersion.
 
     ``bar_timestamps`` is forwarded to CPCV for label-end resolution (full
     trading calendar before the final-horizon feature drop).
     """
     if n_trials < 2:
         msg = "n_trials must be >= 2"
+        raise ValueError(msg)
+    if var_trial_sharpes < 0.0 or not np.isfinite(var_trial_sharpes):
+        msg = "var_trial_sharpes must be a finite non-negative float"
         raise ValueError(msg)
     if cpcv_config.horizon != dataset.horizon:
         msg = "cpcv_config.horizon must equal dataset.horizon"
@@ -164,14 +213,14 @@ def run_overfitting_gate(
     sharpes = np.asarray([p.sharpe for p in path_results], dtype=np.float64)
     path_mean = float(np.mean(sharpes))
     path_std = float(np.std(sharpes, ddof=1)) if len(sharpes) >= 2 else 0.0
-    var_trial = float(np.var(sharpes, ddof=1)) if len(sharpes) >= 2 else 0.0
 
-    concatenated = pd.concat(path_return_series).sort_index()
-    concatenated = concatenated.groupby(level=0).mean()
+    # Merge overlapping CPCV OOS paths → one series; T = len(merged).
+    # Do NOT use path-Sharpe variance for var_trial_sharpes / SR0.
+    merged = aggregate_cpcv_path_returns(path_return_series)
     deflated: DeflatedSharpeReport = deflated_sharpe(
-        concatenated.to_numpy(dtype=np.float64),
+        merged.to_numpy(dtype=np.float64),
         n_trials=n_trials,
-        var_trial_sharpes=var_trial,
+        var_trial_sharpes=var_trial_sharpes,
     )
     return GateVerdict(
         verdict="JA" if deflated.dsr > 0.0 else "NEIN",

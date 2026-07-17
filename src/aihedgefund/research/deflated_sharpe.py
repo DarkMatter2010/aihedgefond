@@ -4,6 +4,19 @@ All Sharpe inputs/outputs in this module are **non-annualized** unless a helper
 explicitly documents an annualization convention. ``n_trials`` is always an
 explicit caller-supplied parameter — never inferred — so selection-bias
 deflation stays honest.
+
+``T`` / ``n_obs``
+    Always the number of **return observations** in the evaluated return
+    series (``len(returns)``). It is **not** the number of CPCV folds/paths.
+    Callers that merge overlapping CPCV OOS paths into one series must pass
+    that merged series so ``T`` matches the unique OOS calendar length.
+
+``var_trial_sharpes``
+    Variance of the **independent research-trial** non-annualized Sharpes
+    (the configurations actually tested). Must **not** be estimated from
+    CPCV path Sharpes — those paths share overlapping train windows and are
+    not an iid sample for selection-bias deflation. Same non-annualized
+    scale as ``observed_sharpe`` / ``sr0``.
 """
 
 from __future__ import annotations
@@ -49,7 +62,8 @@ def sharpe_ratio(returns: np.ndarray | list[float]) -> SharpeReport:
 def expected_max_sharpe(n_trials: int, var_trial_sharpes: float) -> float:
     """Expected maximum Sharpe under the null given ``n_trials`` (SR0).
 
-    ``var_trial_sharpes`` is the variance of non-annualized trial Sharpes.
+    ``var_trial_sharpes`` is the variance of **non-annualized research-trial**
+    Sharpes (independent configurations), not CPCV path variance.
     Hard-fails when ``n_trials < 2`` or variance is negative.
     """
     if n_trials < 2:
@@ -77,10 +91,13 @@ def deflated_sharpe(
 
     ``DSR = Φ( (SR* - SR0) * sqrt(T-1) / sqrt(1 - γ3·SR* + ((γ4-1)/4)·SR*²) )``
 
-    ``n_trials`` must be supplied explicitly (number of independent
-    configurations actually tested).
+    ``T`` is ``len(returns)`` (return observations of the evaluated series).
+    ``n_trials`` / ``var_trial_sharpes`` describe the independent research
+    configurations actually tested (not CPCV fold counts / path variance).
+    ``SR*`` and ``SR0`` share the non-annualized scale of ``returns``.
     """
     report = sharpe_ratio(returns)
+    # report.n_obs == T == number of return observations (not CPCV paths).
     sr0 = expected_max_sharpe(n_trials, var_trial_sharpes)
     dsr = _dsr_from_moments(
         observed_sharpe=report.sharpe,
