@@ -646,3 +646,66 @@ def test_cross_sectional_zscore_matches_manual_formula() -> None:
     assert day1.loc["CCC", "momentum_5_cs_zscore"] == pytest.approx((12.0 - mean1) / std1)
     assert day1.loc["AAA", "momentum_5_cs_rank"] == pytest.approx(0.5)
     assert day1.loc["CCC", "momentum_5_cs_rank"] == pytest.approx(1.0)
+
+
+def _ohlcv_from_close_volume(
+    close: np.ndarray,
+    volume: np.ndarray,
+    *,
+    start: str = "2024-01-02",
+) -> pd.DataFrame:
+    """Minimal OHLCV frame for isolated indicator PIT checks."""
+    index = pd.date_range(start, periods=len(close), freq="B", tz="UTC")
+    open_ = np.r_[close[0], close[:-1]]
+    return pd.DataFrame(
+        {
+            "open": open_,
+            "high": np.maximum(open_, close) * 1.001,
+            "low": np.minimum(open_, close) * 0.999,
+            "close": close,
+            "adj_close": close,
+            "volume": volume.astype(float),
+        },
+        index=index,
+    )
+
+
+@pytest.mark.parametrize(
+    ("feature_name", "builder"),
+    [
+        ("momentum_5", lambda close, _volume: momentum(close, 5)),
+        ("momentum_10", lambda close, _volume: momentum(close, 10)),
+        ("momentum_60", lambda close, _volume: momentum(close, 60)),
+        ("ret_std_10", lambda close, _volume: rolling_return_std(close, 10)),
+        ("ret_std_20", lambda close, _volume: rolling_return_std(close, 20)),
+        ("ret_std_60", lambda close, _volume: rolling_return_std(close, 60)),
+        ("mean_reversion_20", lambda close, _volume: mean_reversion(close, 20)),
+        ("gain_loss_ratio_14", lambda close, _volume: gain_loss_ratio(close, 14)),
+        ("volume_ratio_20", lambda close, volume: volume_ratio(volume, 20)),
+    ],
+)
+def test_new_raw_features_ignore_post_anchor_spike(feature_name: str, builder) -> None:
+    """Value at t must ignore a synthetic spike strictly after t (look-ahead guard)."""
+    rows = 120
+    wave = np.sin(np.linspace(0.0, 8.0 * np.pi, 80))
+    close = np.full(rows, 100.0)
+    volume = np.full(rows, 1_000_000.0)
+    close[:80] = 100.0 + 2.0 * wave
+    volume[:80] = 1_000_000.0 + 50_000.0 * wave
+    anchor_pos = 70
+    frame = _ohlcv_from_close_volume(close, volume)
+    anchor = frame.index[anchor_pos]
+
+    baseline = builder(frame["close"], frame["volume"])
+    spiked_close = close.copy()
+    spiked_volume = volume.copy()
+    spiked_close[anchor_pos + 1 :] = close[anchor_pos + 1 :] * 3.0
+    spiked_volume[anchor_pos + 1 :] = volume[anchor_pos + 1 :] * 10.0
+    spiked = _ohlcv_from_close_volume(spiked_close, spiked_volume)
+    after_spike = builder(spiked["close"], spiked["volume"])
+
+    assert baseline.name == feature_name
+    assert pd.notna(baseline.loc[anchor])
+    assert baseline.loc[anchor] == pytest.approx(float(after_spike.loc[anchor]))
+    later = frame.index[min(anchor_pos + 5, rows - 1)]
+    assert baseline.loc[later] != pytest.approx(float(after_spike.loc[later]))
