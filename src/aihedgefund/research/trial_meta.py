@@ -18,36 +18,39 @@ import numpy as np
 # Universe size used in the Phase-2/3 research runs that produced these trials.
 RESEARCH_TRIAL_N_SYMBOLS = 50
 
-# Published / noted IC means (or rank-IC when Pearson was unavailable) for the
-# 12 independent configurations counted as n_trials in the live gate scripts.
-# Sources: PR #16–#19 live notes and the multi-horizon sweep report.
+# Documented IC inputs for the 12 independent configurations counted as
+# ``n_trials`` in the live gate scripts (same order as scripts/run_cpcv_dsr_gate.py).
 #
-# Index mapping (must stay length-12 and ordered):
-#  1 baseline h=5 (9-feat, post-CA)          ic_mean ≈ 0.00748
-#  2 50-symbol IC validation                 same order (not separately logged)
-#  3 test_start bar-gap fix re-run           same order
-#  4 CA fix re-run h=5                       ic_mean ≈ 0.00748
-#  5 Feature-set #17 at h=5                  ic_mean ≈ 0.0049
-#  6 sweep h=1                               between 0 and h=2 (approx 0.010)
-#  7 sweep h=2 (best candidate)              ic_mean ≈ 0.0146
-#  8 sweep h=5                               ic_mean ≈ 0.0049
-#  9 sweep h=10                              negative ic_mean (approx −0.005)
-# 10 sweep h=20                              negative ic_mean (approx −0.008)
-# 11 momentum-breadth h=63                   rank_ic ≈ −0.009
-# 12 momentum-breadth h=126                  rank_ic ≈ −0.042
+# Metric: Pearson ``ic_mean`` from live Yahoo reports where available; for the
+# momentum-breadth probe (trials 11–12) the decision metric was ``rank_ic_mean``
+# (materiality threshold), so those two use rank-IC.
+#
+# Sources (Slack / PR live notes, 2026-07-16–17):
+#  1  Phase-2 baseline h=5 (9-feat, post-CA era)     PR#16 ic_mean
+#  2  50-symbol IC validation re-run                 PR#15 ic_mean (same era log)
+#  3  test_start bar-gap fix re-run                  PR#15 ic_mean
+#  4  Corporate-actions fix re-run h=5               PR#16 ic_mean
+#  5  Feature-set #17 at h=5                         PR#17 ic_mean
+#  6  Multi-horizon sweep h=1                        PR#18 ic_mean
+#  7  Multi-horizon sweep h=2 (gate candidate)       PR#18 ic_mean
+#  8  Multi-horizon sweep h=5                        PR#18 ic_mean
+#  9  Multi-horizon sweep h=10                       PR#18 ic_mean
+# 10  Multi-horizon sweep h=20                       PR#18 ic_mean
+# 11  Momentum-breadth probe h=63                    PR#19 rank_ic_mean
+# 12  Momentum-breadth probe h=126                   PR#19 rank_ic_mean
 RESEARCH_TRIAL_ICS: tuple[float, ...] = (
-    0.00748,
-    0.00748,
-    0.00748,
-    0.00748,
-    0.0049,
-    0.0100,
-    0.0146,
-    0.0049,
-    -0.0050,
-    -0.0080,
-    -0.0090,
-    -0.0420,
+    0.00748130792855417,
+    0.010580912018430077,
+    0.010580912018430077,
+    0.00748130792855417,
+    -0.0019334085480568778,
+    -0.001361,
+    0.014570,
+    0.004937,
+    -0.016262,
+    -0.012031,
+    -0.008891,
+    -0.042408,
 )
 
 

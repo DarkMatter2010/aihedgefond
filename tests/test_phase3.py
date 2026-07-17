@@ -467,6 +467,35 @@ def test_scores_to_strategy_returns_schema() -> None:
     assert out.dtype == np.float64
 
 
+def test_gate_requires_var_trial_sharpes_kwarg() -> None:
+    """``var_trial_sharpes`` is a required caller parameter (no path-var default)."""
+    dataset, bar_calendar = _mini_dataset(n_days=40, n_symbols=4, horizon=2, seed=SEED)
+    config = CPCVConfig(n_blocks=3, n_test_blocks=1, embargo_days=2, horizon=2)
+    params = build_lgbm_params(
+        seed=SEED,
+        learning_rate=0.1,
+        num_leaves=8,
+        min_data_in_leaf=5,
+        feature_fraction=1.0,
+        bagging_fraction=1.0,
+        bagging_freq=0,
+    )
+    with pytest.raises(TypeError, match="var_trial_sharpes"):
+        run_overfitting_gate(  # type: ignore[call-arg]
+            dataset,
+            cpcv_config=config,
+            model_params=params,
+            num_boost_round=10,
+            n_trials=12,
+            seed=SEED,
+            universe=("S0", "S1", "S2", "S3"),
+            start=date(2024, 1, 2),
+            end=date(2024, 3, 29),
+            frequency="1d",
+            bar_timestamps=bar_calendar,
+        )
+
+
 def test_gate_verdict_schema_and_reproducibility() -> None:
     """Full gate returns a validated GateVerdict and is seed-stable."""
     dataset, bar_calendar = _mini_dataset(n_days=80, n_symbols=4, horizon=2, seed=SEED)
@@ -506,6 +535,10 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
     # SR0 must use the caller-supplied research-trial variance, not path var.
     assert first.deflated.var_trial_sharpes == pytest.approx(VAR_TRIAL_SHARPES)
     assert first.deflated.n_obs >= 2
+    # Path-Sharpe dispersion is diagnostic only — must not equal var_trial.
+    if first.path_sharpe_std > 0.0:
+        path_var = float(first.path_sharpe_std**2)
+        assert first.deflated.var_trial_sharpes != pytest.approx(path_var, rel=1e-6, abs=1e-12)
 
 
 def test_aggregate_cpcv_path_returns_mean_per_timestamp() -> None:
