@@ -132,10 +132,20 @@ def run_overfitting_gate(
         returns = scores_to_strategy_returns(predictions.scores, test.label)
         path_return_series.append(returns)
         ret_arr = returns.to_numpy(dtype=np.float64)
-        if len(ret_arr) >= 2 and float(np.std(ret_arr, ddof=1)) > 0.0:
-            path_sharpe = sharpe_ratio(ret_arr).sharpe
-        else:
-            path_sharpe = 0.0
+        if len(ret_arr) < 2:
+            msg = (
+                f"fold {fold.fold_id}: path Sharpe undefined — "
+                f"need >= 2 return observations, got {len(ret_arr)}"
+            )
+            raise ValueError(msg)
+        std = float(np.std(ret_arr, ddof=1))
+        if (not np.isfinite(std)) or std <= 0.0:
+            msg = (
+                f"fold {fold.fold_id}: path Sharpe undefined — "
+                f"zero return variance (n={len(ret_arr)})"
+            )
+            raise ValueError(msg)
+        path_sharpe = sharpe_ratio(ret_arr).sharpe
         path_results.append(
             GatePathResult(
                 fold_id=fold.fold_id,

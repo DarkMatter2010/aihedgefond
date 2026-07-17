@@ -3,8 +3,8 @@
 Unique ``timestamp`` levels of a ``(timestamp, symbol)`` MultiIndex are split
 into ``N`` contiguous blocks. Every combination of ``k`` test blocks yields one
 fold. Training rows whose label window ``[t0, t1]`` overlaps any test timestamp
-are purged; an additional calendar embargo of ``embargo_days`` after each
-contiguous test segment is also removed from training.
+are purged; an additional trading-bar embargo of ``embargo_days`` unique
+timestamps after each contiguous test segment is also removed from training.
 
 DataFrame / index schema
 ------------------------
@@ -26,7 +26,6 @@ Output ``CPCVFold``:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import timedelta
 from itertools import combinations
 from math import comb
 
@@ -272,8 +271,9 @@ def _embargo_mask(
 ) -> np.ndarray:
     """True where a candidate train row falls in a post-test embargo zone.
 
-    For each maximal contiguous run of test blocks, the embargo covers
-    ``(test_end, test_end + embargo_days]`` in calendar time.
+    For each maximal contiguous run of test blocks, the embargo covers the
+    next ``embargo_days`` unique trading timestamps after ``test_end``
+    (iloc-slice on the sorted timestamp calendar), not calendar days.
     """
     if embargo_days < 0:
         msg = "embargo_days must be >= 0"
@@ -286,12 +286,13 @@ def _embargo_mask(
     is_test_ts = np.isin(block_ids, list(test_block_ids))
     for start, end in _contiguous_true_runs(is_test_ts):
         _ = start
-        test_end = timestamps[end - 1]
-        embargo_until = test_end + timedelta(days=embargo_days)
-        in_zone = np.asarray(
-            (row_timestamps > test_end) & (row_timestamps <= embargo_until),
-            dtype=bool,
-        )
+        # ``end`` is the exclusive index of the test run in ``timestamps``.
+        embargo_start = end
+        embargo_stop = min(end + embargo_days, len(timestamps))
+        if embargo_start >= embargo_stop:
+            continue
+        embargo_ts = timestamps[embargo_start:embargo_stop]
+        in_zone = np.asarray(row_timestamps.isin(embargo_ts), dtype=bool)
         embargo |= in_zone
     return candidate_train & embargo
 

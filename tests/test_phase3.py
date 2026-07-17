@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 from math import sqrt
 
 import numpy as np
@@ -101,7 +101,12 @@ def test_purge_removes_label_overlapping_train_samples() -> None:
 
 
 def test_embargo_zone_boundaries() -> None:
-    """Embargo removes train rows in (test_end, test_end + embargo_days]."""
+    """Embargo removes the next ``embargo_days`` trading timestamps after test_end.
+
+    Calendar-day embargo would miss Fri→Mon: ``Friday + timedelta(days=1)`` is
+    Saturday, so Monday stays in train. Trading-bar embargo must drop Monday
+    when ``embargo_days >= 1``.
+    """
     dataset = _mini_dataset(n_days=50, n_symbols=2, horizon=2)
     embargo_days = 5
     config = CPCVConfig(
@@ -119,23 +124,112 @@ def test_embargo_zone_boundaries() -> None:
     sizes = [base + (1 if i < rem else 0) for i in range(config.n_blocks)]
     block_ids = np.repeat(np.arange(config.n_blocks), sizes)
 
+    saw_friday_monday = False
     for fold in result.folds:
         test_block = fold.test_block_ids[0]
         block_mask = block_ids == test_block
-        test_end = timestamps[block_mask][-1]
-        embargo_until = test_end + timedelta(days=embargo_days)
+        test_end_iloc = int(np.flatnonzero(block_mask)[-1])
+        test_end = timestamps[test_end_iloc]
+        embargo_start = test_end_iloc + 1
+        embargo_stop = min(embargo_start + embargo_days, len(timestamps))
+        embargo_ts = set(timestamps[embargo_start:embargo_stop])
         train_set = set(fold.train_positions)
         test_set = set(fold.test_positions)
         for pos, ts in enumerate(row_ts):
             if pos in test_set:
                 continue
-            in_embargo = bool(ts > test_end and ts <= embargo_until)
-            if in_embargo:
+            if ts in embargo_ts:
                 assert pos not in train_set, (
                     f"fold {fold.fold_id}: embargo row {ts} still in train"
                 )
                 assert fold.embargoed_train_count > 0
 
+        # Friday → Monday: next trading bar after Friday must be embargoed.
+        if test_end.dayofweek == 4 and embargo_start < len(timestamps):
+            monday = timestamps[embargo_start]
+            assert monday.dayofweek == 0, (
+                f"expected Monday after Friday test_end={test_end}, got {monday}"
+            )
+            monday_positions = [
+                pos for pos, ts in enumerate(row_ts) if ts == monday and pos not in test_set
+            ]
+            assert monday_positions, f"no Monday rows for {monday}"
+            for pos in monday_positions:
+                assert pos not in train_set, (
+                    f"fold {fold.fold_id}: Monday {monday} after Friday "
+                    f"test_end must be embargoed (trading-bar, not calendar)"
+                )
+            saw_friday_monday = True
+
+    assert saw_friday_monday, (
+        "fixture must include a Friday test_end so Fri→Mon embargo is asserted"
+    )
+
+
+def test_gate_hard_fails_on_undefined_path_sharpe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undefined path Sharpe (<2 obs or zero variance) must hard-fail, not default to 0."""
+    dataset = _mini_dataset(n_days=40, n_symbols=4, horizon=2, seed=SEED)
+    config = CPCVConfig(n_blocks=3, n_test_blocks=1, embargo_days=2, horizon=2)
+    params = build_lgbm_params(
+        seed=SEED,
+        learning_rate=0.1,
+        num_leaves=8,
+        min_data_in_leaf=5,
+        feature_fraction=1.0,
+        bagging_fraction=1.0,
+        bagging_freq=0,
+    )
+    kwargs = dict(
+        dataset=dataset,
+        cpcv_config=config,
+        model_params=params,
+        num_boost_round=10,
+        n_trials=12,
+        seed=SEED,
+        universe=("S0", "S1", "S2", "S3"),
+        start=date(2024, 1, 2),
+        end=date(2024, 3, 29),
+        frequency="1d",
+    )
+
+    def _zero_variance_returns(
+        scores: pd.Series,
+        forward_returns: pd.Series,
+    ) -> pd.Series:
+        ts = scores.index.get_level_values("timestamp").unique().sort_values()
+        return pd.Series(
+            0.0,
+            index=pd.DatetimeIndex(ts, name="timestamp"),
+            dtype="float64",
+            name="strategy_return",
+        )
+
+    monkeypatch.setattr(
+        "aihedgefund.research.gate.scores_to_strategy_returns",
+        _zero_variance_returns,
+    )
+    with pytest.raises(ValueError, match=r"fold \d+: path Sharpe undefined"):
+        run_overfitting_gate(**kwargs)
+
+    def _single_obs_returns(
+        scores: pd.Series,
+        forward_returns: pd.Series,
+    ) -> pd.Series:
+        _ = forward_returns
+        ts0 = scores.index.get_level_values("timestamp").unique().sort_values()[0]
+        return pd.Series(
+            [0.01],
+            index=pd.DatetimeIndex([ts0], name="timestamp"),
+            dtype="float64",
+            name="strategy_return",
+        )
+
+    monkeypatch.setattr(
+        "aihedgefund.research.gate.scores_to_strategy_returns",
+        _single_obs_returns,
+    )
+    with pytest.raises(ValueError, match=r"fold \d+: path Sharpe undefined"):
+        run_overfitting_gate(**kwargs)
 
 def test_dsr_matches_bailey_lopez_de_prado_2014_example() -> None:
     """Sanity-check DSR against the published numerical example.
