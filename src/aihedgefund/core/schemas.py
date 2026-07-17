@@ -774,3 +774,104 @@ class Phase2Sidecar(BoundaryDTO):
         if isinstance(value, list):
             return tuple(value)
         return value
+
+
+class CPCVConfig(BoundaryDTO):
+    """Combinatorial purged cross-validation parameters.
+
+    Unique timestamps are partitioned into ``n_blocks`` contiguous blocks.
+    Every combination of ``n_test_blocks`` blocks forms one test fold; the
+    remainder is training after purge + embargo.
+    """
+
+    n_blocks: Annotated[int, Field(ge=2)]
+    n_test_blocks: Annotated[int, Field(ge=1)]
+    embargo_days: Annotated[int, Field(ge=0)]
+    horizon: Annotated[int, Field(ge=1)]
+
+    @model_validator(mode="after")
+    def test_blocks_must_fit(self) -> CPCVConfig:
+        """Require k < N so every fold retains a non-empty train pool."""
+        if self.n_test_blocks >= self.n_blocks:
+            msg = "n_test_blocks must be < n_blocks"
+            raise ValueError(msg)
+        return self
+
+
+class CPCVFold(BoundaryDTO):
+    """One combinatorial fold after purge and embargo.
+
+    ``train_positions`` / ``test_positions`` are integer locations into the
+    row order of the input ``BaselineDataset`` (``iloc`` indices).
+    """
+
+    fold_id: Annotated[int, Field(ge=0)]
+    test_block_ids: Annotated[tuple[Annotated[int, Field(ge=0)], ...], Field(min_length=1)]
+    train_positions: Annotated[tuple[Annotated[int, Field(ge=0)], ...], Field(min_length=1)]
+    test_positions: Annotated[tuple[Annotated[int, Field(ge=0)], ...], Field(min_length=1)]
+    purged_train_count: Annotated[int, Field(ge=0)]
+    embargoed_train_count: Annotated[int, Field(ge=0)]
+
+
+class CPCVSplitResult(BoundaryDTO):
+    """Full CPCV enumeration for one dataset."""
+
+    config: CPCVConfig
+    n_folds: Annotated[int, Field(ge=1)]
+    n_timestamps: Annotated[int, Field(ge=1)]
+    folds: Annotated[tuple[CPCVFold, ...], Field(min_length=1)]
+
+
+class SharpeReport(BoundaryDTO):
+    """Non-annualized Sharpe plus higher moments used by DSR."""
+
+    sharpe: FiniteFloat
+    n_obs: Annotated[int, Field(ge=2)]
+    skewness: FiniteFloat
+    kurtosis: FiniteFloat  # Pearson (normal == 3)
+
+
+class DeflatedSharpeReport(BoundaryDTO):
+    """Bailey & López de Prado (2014) Deflated Sharpe Ratio result."""
+
+    observed_sharpe: FiniteFloat
+    sr0: FiniteFloat
+    dsr: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+    n_trials: Annotated[int, Field(ge=1)]
+    var_trial_sharpes: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    n_obs: Annotated[int, Field(ge=2)]
+    skewness: FiniteFloat
+    kurtosis: FiniteFloat
+
+
+class GatePathResult(BoundaryDTO):
+    """Per-CPCV-fold OOS path diagnostics."""
+
+    fold_id: Annotated[int, Field(ge=0)]
+    sharpe: FiniteFloat
+    n_return_obs: Annotated[int, Field(ge=1)]
+    mean_return: FiniteFloat
+
+
+class GateVerdict(BoundaryDTO):
+    """Phase-3 overfitting gate: DSR > 0 → JA, otherwise NEIN."""
+
+    verdict: Literal["JA", "NEIN"]
+    dsr: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+    n_trials: Annotated[int, Field(ge=1)]
+    path_sharpe_mean: FiniteFloat
+    path_sharpe_std: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    path_results: Annotated[tuple[GatePathResult, ...], Field(min_length=1)]
+    deflated: DeflatedSharpeReport
+    cpcv: CPCVSplitResult
+    horizon: Annotated[int, Field(ge=1)]
+    seed: Annotated[int, Field(ge=0)]
+
+    @model_validator(mode="after")
+    def verdict_must_match_dsr(self) -> GateVerdict:
+        """Hard-bind JA/NEIN to the DSR > 0 rule."""
+        expected: Literal["JA", "NEIN"] = "JA" if self.dsr > 0.0 else "NEIN"
+        if self.verdict != expected:
+            msg = f"verdict {self.verdict!r} inconsistent with dsr={self.dsr}"
+            raise ValueError(msg)
+        return self
