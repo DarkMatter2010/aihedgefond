@@ -13,7 +13,20 @@ from pydantic import ValidationError
 from aihedgefund.core.bus import InProcessMessageBus
 from aihedgefund.core.config import load_settings
 from aihedgefund.core.schemas import BarFrame, BaselineDataset, Phase2Sidecar
-from aihedgefund.features.pipeline import FEATURE_COLUMNS, FeaturePipeline
+from aihedgefund.features.indicators import (
+    gain_loss_ratio,
+    mean_reversion,
+    momentum,
+    rolling_return_std,
+    volume_ratio,
+)
+from aihedgefund.features.pipeline import (
+    FEATURE_COLUMNS,
+    MAX_FEATURE_WARMUP_BARS,
+    NEW_RAW_FEATURE_COLUMNS,
+    FeaturePipeline,
+    add_cross_sectional_features,
+)
 from aihedgefund.research.adapters.filesystem import FilesystemModelArtifactAdapter
 from aihedgefund.research.baseline import (
     build_lgbm_params,
@@ -466,3 +479,233 @@ def test_build_lgbm_params_are_deterministic_regressor() -> None:
     assert params["force_col_wise"] is True
     assert params["num_threads"] == 1
     assert params["seed"] == SEED
+
+
+def test_feature_columns_include_phase2_expansion() -> None:
+    for column in NEW_RAW_FEATURE_COLUMNS:
+        assert column in FEATURE_COLUMNS
+        assert f"{column}_cs_rank" in FEATURE_COLUMNS
+        assert f"{column}_cs_zscore" in FEATURE_COLUMNS
+    assert "momentum_20" in FEATURE_COLUMNS
+    assert len(FEATURE_COLUMNS) == 9 + len(NEW_RAW_FEATURE_COLUMNS) * 3
+
+
+@pytest.mark.parametrize(
+    ("column", "formula"),
+    [
+        ("momentum_5", lambda close, _vol: momentum(close, 5)),
+        ("momentum_10", lambda close, _vol: momentum(close, 10)),
+        ("momentum_60", lambda close, _vol: momentum(close, 60)),
+        ("ret_std_10", lambda close, _vol: rolling_return_std(close, 10)),
+        ("ret_std_20", lambda close, _vol: rolling_return_std(close, 20)),
+        ("ret_std_60", lambda close, _vol: rolling_return_std(close, 60)),
+        ("mean_reversion_20", lambda close, _vol: mean_reversion(close, 20)),
+        ("gain_loss_ratio_14", lambda close, _vol: gain_loss_ratio(close, 14)),
+        ("volume_ratio_20", lambda close, vol: volume_ratio(vol, 20)),
+    ],
+)
+def test_new_raw_feature_point_in_time_correctness(column: str, formula) -> None:
+    """Truncating history after t must not change the feature value at t."""
+    bars = multi_symbol_bars(("AAA", "BBB"))
+    bus = InProcessMessageBus()
+    full = FeaturePipeline(bus).compute(bars)
+    symbol = "AAA"
+    frame = bars.bars[symbol]
+    anchor = frame.index[90]
+    assert pd.notna(full.loc[(anchor, symbol), column])
+
+    truncated = FeaturePipeline(InProcessMessageBus()).compute(
+        BarFrame(
+            bars={symbol: frame.loc[:anchor]},
+            dividends={symbol: bars.dividends[symbol].loc[:anchor]},
+            splits={symbol: bars.splits[symbol].loc[:anchor]},
+        )
+    )
+    assert full.loc[(anchor, symbol), column] == pytest.approx(
+        truncated.loc[(anchor, symbol), column]
+    )
+
+    expected = formula(frame["close"].astype(float), frame["volume"].astype(float))
+    assert full.loc[(anchor, symbol), column] == pytest.approx(float(expected.loc[anchor]))
+
+
+def test_warmup_nans_dropped_consistently_by_dataset_assembly() -> None:
+    """60d windows leave leading NaNs; assemble_baseline_dataset drops them."""
+    bars = multi_symbol_bars(("AAA", "BBB", "CCC"))
+    features = FeaturePipeline(InProcessMessageBus()).compute(bars)
+    labels, _ = make_forward_return_labels(bars, horizon=HORIZON)
+
+    long_window_cols = ("momentum_60", "ret_std_60")
+    for column in long_window_cols:
+        leading = features[column].isna()
+        assert leading.any()
+        # First MAX_FEATURE_WARMUP_BARS rows per symbol are incomplete for 60d windows.
+        for symbol in bars.bars:
+            symbol_vals = features.xs(symbol, level="symbol")[column]
+            assert symbol_vals.iloc[:MAX_FEATURE_WARMUP_BARS].isna().all()
+            assert symbol_vals.iloc[MAX_FEATURE_WARMUP_BARS:].notna().any()
+
+    dataset = assemble_baseline_dataset(features, labels, horizon=HORIZON)
+    assert not dataset.features.isna().any().any()
+    assert not dataset.label.isna().any()
+    for symbol in bars.bars:
+        kept = dataset.features.xs(symbol, level="symbol")
+        full_index = features.xs(symbol, level="symbol").index
+        first_kept_pos = full_index.get_loc(kept.index.min())
+        assert isinstance(first_kept_pos, int)
+        assert first_kept_pos >= MAX_FEATURE_WARMUP_BARS
+
+
+def test_cross_sectional_rank_zscore_point_in_time_and_available_only() -> None:
+    """CS transforms use only symbols with a finite value at date t — no future leak."""
+    short = _synthetic_symbol_frame(SEED, rows=80)
+    long = _synthetic_symbol_frame(SEED + 1, rows=160)
+    # Align short symbol onto the *end* of the long calendar so early dates
+    # have only one available symbol for 60d features.
+    shared_tail = long.index[-len(short) :]
+    short = short.copy()
+    short.index = shared_tail
+    bars = BarFrame(
+        bars={"SHORT": short, "LONG": long},
+        dividends={
+            "SHORT": pd.Series(0.0, index=short.index),
+            "LONG": pd.Series(0.0, index=long.index),
+        },
+        splits={
+            "SHORT": pd.Series(0.0, index=short.index),
+            "LONG": pd.Series(0.0, index=long.index),
+        },
+    )
+    matrix = FeaturePipeline(InProcessMessageBus()).compute(bars)
+
+    early = long.index[70]
+    assert early not in short.index
+    # Before SHORT exists, CS fields for LONG must not see SHORT.
+    pre_short = long.index[long.index.get_indexer([short.index.min()])[0] - 1]
+    assert pre_short < short.index.min()
+    raw = matrix.loc[(pre_short, "LONG"), "momentum_5"]
+    if pd.notna(raw):
+        # Single available symbol → neutral z-score (undefined cross-section).
+        assert matrix.loc[(pre_short, "LONG"), "momentum_5_cs_zscore"] == pytest.approx(0.0)
+        assert matrix.loc[(pre_short, "LONG"), "momentum_5_cs_rank"] == pytest.approx(1.0)
+
+    # Truncation PIT: CS values at a shared date must match when future bars removed.
+    anchor = shared_tail[40]
+    truncated = FeaturePipeline(InProcessMessageBus()).compute(
+        BarFrame(
+            bars={
+                "SHORT": short.loc[:anchor],
+                "LONG": long.loc[:anchor],
+            },
+            dividends={
+                "SHORT": pd.Series(0.0, index=short.loc[:anchor].index),
+                "LONG": pd.Series(0.0, index=long.loc[:anchor].index),
+            },
+            splits={
+                "SHORT": pd.Series(0.0, index=short.loc[:anchor].index),
+                "LONG": pd.Series(0.0, index=long.loc[:anchor].index),
+            },
+        )
+    )
+    for column in ("momentum_5_cs_rank", "momentum_5_cs_zscore", "volume_ratio_20_cs_rank"):
+        pd.testing.assert_series_equal(
+            matrix.loc[anchor, column].sort_index(),
+            truncated.loc[anchor, column].sort_index(),
+            check_names=False,
+        )
+
+
+def test_cross_sectional_zscore_matches_manual_formula() -> None:
+    index = pd.MultiIndex.from_product(
+        [
+            pd.to_datetime(["2024-06-03", "2024-06-04"], utc=True),
+            ("AAA", "BBB", "CCC"),
+        ],
+        names=("timestamp", "symbol"),
+    )
+    values = pd.Series([1.0, 2.0, 3.0, 10.0, np.nan, 12.0], index=index, name="momentum_5")
+    frame = pd.DataFrame({"momentum_5": values})
+    out = add_cross_sectional_features(frame, ("momentum_5",))
+
+    day0 = out.xs(index.levels[0][0], level="timestamp")
+    mean0 = 2.0
+    std0 = float(np.std([1.0, 2.0, 3.0], ddof=0))
+    np.testing.assert_allclose(
+        day0["momentum_5_cs_zscore"].to_numpy(),
+        (np.array([1.0, 2.0, 3.0]) - mean0) / std0,
+    )
+    assert day0["momentum_5_cs_rank"].tolist() == pytest.approx([1 / 3, 2 / 3, 1.0])
+
+    day1 = out.xs(index.levels[0][1], level="timestamp")
+    # BBB is NaN → excluded from mean/std/rank denominator.
+    mean1 = 11.0
+    std1 = float(np.std([10.0, 12.0], ddof=0))
+    assert pd.isna(day1.loc["BBB", "momentum_5_cs_zscore"])
+    assert pd.isna(day1.loc["BBB", "momentum_5_cs_rank"])
+    assert day1.loc["AAA", "momentum_5_cs_zscore"] == pytest.approx((10.0 - mean1) / std1)
+    assert day1.loc["CCC", "momentum_5_cs_zscore"] == pytest.approx((12.0 - mean1) / std1)
+    assert day1.loc["AAA", "momentum_5_cs_rank"] == pytest.approx(0.5)
+    assert day1.loc["CCC", "momentum_5_cs_rank"] == pytest.approx(1.0)
+
+
+def _ohlcv_from_close_volume(
+    close: np.ndarray,
+    volume: np.ndarray,
+    *,
+    start: str = "2024-01-02",
+) -> pd.DataFrame:
+    """Minimal OHLCV frame for isolated indicator PIT checks."""
+    index = pd.date_range(start, periods=len(close), freq="B", tz="UTC")
+    open_ = np.r_[close[0], close[:-1]]
+    return pd.DataFrame(
+        {
+            "open": open_,
+            "high": np.maximum(open_, close) * 1.001,
+            "low": np.minimum(open_, close) * 0.999,
+            "close": close,
+            "adj_close": close,
+            "volume": volume.astype(float),
+        },
+        index=index,
+    )
+
+
+@pytest.mark.parametrize(
+    ("feature_name", "builder"),
+    [
+        ("momentum_5", lambda close, _volume: momentum(close, 5)),
+        ("momentum_10", lambda close, _volume: momentum(close, 10)),
+        ("momentum_60", lambda close, _volume: momentum(close, 60)),
+        ("ret_std_10", lambda close, _volume: rolling_return_std(close, 10)),
+        ("ret_std_20", lambda close, _volume: rolling_return_std(close, 20)),
+        ("ret_std_60", lambda close, _volume: rolling_return_std(close, 60)),
+        ("mean_reversion_20", lambda close, _volume: mean_reversion(close, 20)),
+        ("gain_loss_ratio_14", lambda close, _volume: gain_loss_ratio(close, 14)),
+        ("volume_ratio_20", lambda close, volume: volume_ratio(volume, 20)),
+    ],
+)
+def test_new_raw_features_ignore_post_anchor_spike(feature_name: str, builder) -> None:
+    """Value at t must ignore a synthetic spike strictly after t (look-ahead guard)."""
+    rows = 120
+    wave = np.sin(np.linspace(0.0, 8.0 * np.pi, 80))
+    close = np.full(rows, 100.0)
+    volume = np.full(rows, 1_000_000.0)
+    close[:80] = 100.0 + 2.0 * wave
+    volume[:80] = 1_000_000.0 + 50_000.0 * wave
+    anchor_pos = 70
+    frame = _ohlcv_from_close_volume(close, volume)
+    anchor = frame.index[anchor_pos]
+
+    baseline = builder(frame["close"], frame["volume"])
+    spiked_close = close.copy()
+    spiked_volume = volume.copy()
+    spiked_close[anchor_pos + 1 :] = close[anchor_pos + 1 :] * 3.0
+    spiked_volume[anchor_pos + 1 :] = volume[anchor_pos + 1 :] * 10.0
+    spiked = _ohlcv_from_close_volume(spiked_close, spiked_volume)
+    after_spike = builder(spiked["close"], spiked["volume"])
+
+    assert baseline.name == feature_name
+    assert pd.notna(baseline.loc[anchor])
+    assert baseline.loc[anchor] == pytest.approx(float(after_spike.loc[anchor]))
+    later = frame.index[min(anchor_pos + 5, rows - 1)]
+    assert baseline.loc[later] != pytest.approx(float(after_spike.loc[later]))
