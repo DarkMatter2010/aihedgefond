@@ -74,9 +74,7 @@ def macd(
     slow_ema = values.ewm(span=slow, adjust=False, min_periods=slow).mean()
     macd_line = (fast_ema - slow_ema).rename("macd")
     signal_line = (
-        macd_line.ewm(span=signal, adjust=False, min_periods=signal)
-        .mean()
-        .rename("macd_signal")
+        macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean().rename("macd_signal")
     )
     return pd.concat((macd_line, signal_line), axis=1)
 
@@ -160,3 +158,47 @@ def volume_ratio(volume: pd.Series, window: int) -> pd.Series:
     values = volume.astype(float)
     trailing_mean = values.rolling(window, min_periods=window).mean()
     return (values / trailing_mean.replace(0.0, np.nan)).rename(f"volume_ratio_{window}")
+
+
+def reversal(close: pd.Series, periods: int) -> pd.Series:
+    """Short-horizon reversal = ``-1 *`` past cumulative simple return.
+
+    Positive values mean the name fell over the lookback (mean-reversion long
+    signal). Uses only ``close[t]`` and ``close[t-periods]`` — no future bars.
+    """
+    if periods < 1:
+        msg = "periods must be positive"
+        raise ValueError(msg)
+    past_return = close.astype(float) / close.astype(float).shift(periods) - 1.0
+    return (-1.0 * past_return).rename(f"reversal_{periods}")
+
+
+def inverse_realized_vol(close: pd.Series, window: int) -> pd.Series:
+    """Inverse of rolling close-to-close log-return std (low-vol anomaly).
+
+    Higher values = lower realized volatility. Zero/NaN std maps to NaN.
+    """
+    if window < 2:
+        msg = "window must be at least two"
+        raise ValueError(msg)
+    vol = log_return(close).rolling(window, min_periods=window).std(ddof=0)
+    return (1.0 / vol.replace(0.0, np.nan)).rename(f"inv_ret_std_{window}")
+
+
+def parkinson_volatility(frame: pd.DataFrame, window: int) -> pd.Series:
+    """Parkinson high-low range volatility over a fixed trailing window.
+
+    ``sqrt( (1 / (4 n ln 2)) * Σ ln(H/L)^2 )`` using only bars ``<= t``.
+    Requires ``high`` and ``low`` columns on the (adjusted) OHLCV frame.
+    """
+    if window < 2:
+        msg = "window must be at least two"
+        raise ValueError(msg)
+    high = frame["high"].astype(float)
+    low = frame["low"].astype(float)
+    # Guard zero/negative ranges → NaN contribution.
+    ratio = (high / low.replace(0.0, np.nan)).where((high > 0.0) & (low > 0.0))
+    log_hl_sq = np.log(ratio) ** 2
+    summed = log_hl_sq.rolling(window, min_periods=window).sum()
+    scale = 1.0 / (4.0 * float(window) * float(np.log(2.0)))
+    return np.sqrt(scale * summed).rename(f"parkinson_vol_{window}")
