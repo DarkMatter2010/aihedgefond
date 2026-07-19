@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
-from aihedgefund.core.schemas import BaselineDataset, CPCVConfig
+from aihedgefund.core.schemas import BaselineDataset, CPCVConfig, GateVerdict
 from aihedgefund.research.baseline import build_lgbm_params
 from aihedgefund.research.cpcv import (
     _label_end_times,
@@ -23,10 +23,21 @@ from aihedgefund.research.deflated_sharpe import (
     expected_max_sharpe,
     sharpe_ratio,
 )
-from aihedgefund.research.gate import run_overfitting_gate, scores_to_strategy_returns
+from aihedgefund.research.gate import (
+    merge_cpcv_path_returns,
+    run_overfitting_gate,
+    scores_to_strategy_returns,
+)
+from aihedgefund.research.research_trials import (
+    N_RESEARCH_TRIALS,
+    RESEARCH_TRIAL_SHARPES,
+    research_trial_sharpe_variance,
+)
 
 SEED = 20260717
 HORIZON = 2
+# Research-trial variance for gate tests (same source as live scripts).
+VAR_TRIAL = research_trial_sharpe_variance()
 
 
 def _mini_dataset(
@@ -331,6 +342,7 @@ def test_gate_hard_fails_on_undefined_path_sharpe(monkeypatch: pytest.MonkeyPatc
         model_params=params,
         num_boost_round=10,
         n_trials=12,
+        var_trial_sharpes=VAR_TRIAL,
         seed=SEED,
         universe=("S0", "S1", "S2", "S3"),
         start=date(2024, 1, 2),
@@ -454,6 +466,35 @@ def test_scores_to_strategy_returns_schema() -> None:
     assert out.dtype == np.float64
 
 
+def test_gate_requires_var_trial_sharpes_kwarg() -> None:
+    """``var_trial_sharpes`` is a required caller parameter (no path-var default)."""
+    dataset, bar_calendar = _mini_dataset(n_days=40, n_symbols=4, horizon=2, seed=SEED)
+    config = CPCVConfig(n_blocks=3, n_test_blocks=1, embargo_days=2, horizon=2)
+    params = build_lgbm_params(
+        seed=SEED,
+        learning_rate=0.1,
+        num_leaves=8,
+        min_data_in_leaf=5,
+        feature_fraction=1.0,
+        bagging_fraction=1.0,
+        bagging_freq=0,
+    )
+    with pytest.raises(TypeError, match="var_trial_sharpes"):
+        run_overfitting_gate(  # type: ignore[call-arg]
+            dataset,
+            cpcv_config=config,
+            model_params=params,
+            num_boost_round=10,
+            n_trials=N_RESEARCH_TRIALS,
+            seed=SEED,
+            universe=("S0", "S1", "S2", "S3"),
+            start=date(2024, 1, 2),
+            end=date(2024, 3, 29),
+            frequency="1d",
+            bar_timestamps=bar_calendar,
+        )
+
+
 def test_gate_verdict_schema_and_reproducibility() -> None:
     """Full gate returns a validated GateVerdict and is seed-stable."""
     dataset, bar_calendar = _mini_dataset(n_days=80, n_symbols=4, horizon=2, seed=SEED)
@@ -472,7 +513,8 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
         cpcv_config=config,
         model_params=params,
         num_boost_round=20,
-        n_trials=12,
+        n_trials=N_RESEARCH_TRIALS,
+        var_trial_sharpes=VAR_TRIAL,
         seed=SEED,
         universe=("S0", "S1", "S2", "S3"),
         start=date(2024, 1, 2),
@@ -483,12 +525,157 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
     first = run_overfitting_gate(**kwargs)
     second = run_overfitting_gate(**kwargs)
     assert first.verdict in {"JA", "NEIN"}
-    assert first.verdict == ("JA" if first.dsr > 0.0 else "NEIN")
-    assert first.n_trials == 12
+    assert first.verdict == ("JA" if first.dsr >= 0.95 else "NEIN")
+    assert first.n_trials == N_RESEARCH_TRIALS
     assert first.cpcv.n_folds == 4
     assert first.dsr == second.dsr
     assert first.path_sharpe_mean == second.path_sharpe_mean
     assert len(first.path_results) == first.cpcv.n_folds
+    # T must be the merged return series length, not the fold count.
+    assert first.deflated.n_obs != first.cpcv.n_folds
+    assert first.deflated.var_trial_sharpes == pytest.approx(VAR_TRIAL)
+    # Path-Sharpe dispersion is diagnostic only — must not equal var_trial.
+    if first.path_sharpe_std > 0.0:
+        path_var = float(first.path_sharpe_std**2)
+        assert first.deflated.var_trial_sharpes != pytest.approx(
+            path_var, rel=1e-6, abs=1e-12
+        )
+
+
+def test_research_trial_sharpes_source_not_cpcv_paths() -> None:
+    """var_trial_sharpes from logged Sharpes; n_trials rounds up conservatively."""
+    assert N_RESEARCH_TRIALS == 15
+    assert len(RESEARCH_TRIAL_SHARPES) == 12
+    assert N_RESEARCH_TRIALS >= len(RESEARCH_TRIAL_SHARPES)
+    assert research_trial_sharpe_variance() > 0.0
+
+
+def test_known_noise_via_real_gate_aggregation_path() -> None:
+    """Known-noise strategy through the real merge+DSR path stays below threshold.
+
+    Labels are independent of features (pure noise). The gate still merges CPCV
+    path returns into one series and applies DSR with research-trial variance —
+    not the synthetic ``deflated_sharpe`` shortcut. A gate that still yields
+    DSR ≈ 0.9 on noise is broken.
+    """
+    n_days = 120
+    n_symbols = 6
+    horizon = 2
+    rng = np.random.default_rng(SEED + 99)
+    dates = pd.date_range("2023-01-02", periods=n_days, freq="B", tz="UTC")
+    usable = dates[: n_days - horizon]
+    rows: list[tuple[pd.Timestamp, str]] = []
+    feat_rows: list[list[float]] = []
+    labels: list[float] = []
+    feature_columns = ("f0", "f1", "f2")
+    for symbol in [f"S{i}" for i in range(n_symbols)]:
+        for ts in usable:
+            rows.append((ts, symbol))
+            # Features and labels drawn independently → no predictable signal.
+            feat_rows.append(list(rng.normal(0.0, 1.0, size=3)))
+            labels.append(float(rng.normal(0.0, 0.02)))
+    index = pd.MultiIndex.from_tuples(rows, names=("timestamp", "symbol"))
+    features = pd.DataFrame(
+        feat_rows, index=index, columns=list(feature_columns), dtype="float64"
+    ).sort_index()
+    label = pd.Series(
+        labels, index=index, dtype="float64", name=f"forward_return_{horizon}"
+    ).loc[features.index]
+    dataset = BaselineDataset(
+        features=features,
+        label=label,
+        horizon=horizon,
+        feature_columns=feature_columns,
+    )
+    config = CPCVConfig(n_blocks=6, n_test_blocks=2, embargo_days=horizon, horizon=horizon)
+    params = build_lgbm_params(
+        seed=SEED,
+        learning_rate=0.1,
+        num_leaves=8,
+        min_data_in_leaf=5,
+        feature_fraction=1.0,
+        bagging_fraction=1.0,
+        bagging_freq=0,
+    )
+    verdict = run_overfitting_gate(
+        dataset,
+        cpcv_config=config,
+        model_params=params,
+        num_boost_round=30,
+        n_trials=N_RESEARCH_TRIALS,
+        var_trial_sharpes=VAR_TRIAL,
+        seed=SEED,
+        universe=tuple(f"S{i}" for i in range(n_symbols)),
+        start=date(2023, 1, 2),
+        end=date(2023, 6, 30),
+        frequency="1d",
+        bar_timestamps=dates,
+    )
+    # T = merged OOS return length, not C(N, k) fold count.
+    assert verdict.deflated.n_obs > verdict.cpcv.n_folds
+    assert verdict.deflated.var_trial_sharpes == pytest.approx(VAR_TRIAL)
+    # Hard threshold on the real aggregation path: noise must stay well below
+    # the old false-positive regime (~0.9). Gate JA requires dsr >= 0.95.
+    assert verdict.dsr < 0.1, (
+        f"known-noise DSR={verdict.dsr} too high — gate aggregation still inflated"
+    )
+    assert verdict.verdict == "NEIN"
+
+
+def test_near_null_dsr_cannot_be_labelled_ja() -> None:
+    """Near-null Φ(z) must not rubber-stamp JA under the vacuous dsr>0 rule."""
+    dataset, bar_calendar = _mini_dataset(n_days=80, n_symbols=4, horizon=2, seed=SEED)
+    config = CPCVConfig(n_blocks=4, n_test_blocks=1, embargo_days=2, horizon=2)
+    params = build_lgbm_params(
+        seed=SEED,
+        learning_rate=0.1,
+        num_leaves=8,
+        min_data_in_leaf=5,
+        feature_fraction=1.0,
+        bagging_fraction=1.0,
+        bagging_freq=0,
+    )
+    verdict = run_overfitting_gate(
+        dataset=dataset,
+        cpcv_config=config,
+        model_params=params,
+        num_boost_round=20,
+        n_trials=N_RESEARCH_TRIALS,
+        var_trial_sharpes=VAR_TRIAL,
+        seed=SEED,
+        universe=("S0", "S1", "S2", "S3"),
+        start=date(2024, 1, 2),
+        end=date(2024, 4, 30),
+        frequency="1d",
+        bar_timestamps=bar_calendar,
+    )
+    payload = verdict.model_dump()
+    # Live-claim class: DSR≈2.7e-06 is >0 but must not be JA.
+    payload["dsr"] = 2.7e-06
+    payload["verdict"] = "JA"
+    with pytest.raises(ValidationError, match="inconsistent with dsr"):
+        GateVerdict.model_validate(payload)
+    payload["verdict"] = "NEIN"
+    ok = GateVerdict.model_validate(payload)
+    assert ok.verdict == "NEIN"
+    assert ok.dsr == pytest.approx(2.7e-06)
+
+
+def test_merge_cpcv_path_returns_sets_t() -> None:
+    """Merged path returns define T for DSR; fold count is not T."""
+    idx_a = pd.DatetimeIndex(["2024-01-02", "2024-01-03"], tz="UTC", name="timestamp")
+    idx_b = pd.DatetimeIndex(["2024-01-03", "2024-01-04"], tz="UTC", name="timestamp")
+    path_a = pd.Series([0.01, 0.02], index=idx_a, dtype="float64")
+    path_b = pd.Series([0.04, 0.03], index=idx_b, dtype="float64")
+    merged = merge_cpcv_path_returns([path_a, path_b])
+    assert len(merged) == 3
+    assert float(merged.loc[pd.Timestamp("2024-01-03", tz="UTC")]) == pytest.approx(0.03)
+    report = deflated_sharpe(
+        merged.to_numpy(),
+        n_trials=N_RESEARCH_TRIALS,
+        var_trial_sharpes=VAR_TRIAL,
+    )
+    assert report.n_obs == len(merged)
 
 
 def test_subset_by_positions_preserves_schema() -> None:
