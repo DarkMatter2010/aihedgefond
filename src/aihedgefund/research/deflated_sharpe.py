@@ -4,6 +4,20 @@ All Sharpe inputs/outputs in this module are **non-annualized** unless a helper
 explicitly documents an annualization convention. ``n_trials`` is always an
 explicit caller-supplied parameter — never inferred — so selection-bias
 deflation stays honest.
+
+``T`` / ``n_obs``
+----------------
+``T`` is the number of return observations in the **evaluated return series**
+passed to ``deflated_sharpe`` / returned as ``SharpeReport.n_obs``. It is
+**not** the number of CPCV folds/paths. Callers that merge overlapping CPCV
+OOS paths into one series must pass that merged series so ``T`` matches its
+length (see ``gate.merge_cpcv_path_returns``).
+
+``var_trial_sharpes`` / SR0
+--------------------------
+Variance of the independent **research-trial** Sharpes (same non-annualized
+scale as ``observed_sharpe``). Must not be taken from CPCV path-Sharpe
+dispersion — those paths are dependent.
 """
 
 from __future__ import annotations
@@ -78,9 +92,15 @@ def deflated_sharpe(
     ``DSR = Φ( (SR* - SR0) * sqrt(T-1) / sqrt(1 - γ3·SR* + ((γ4-1)/4)·SR*²) )``
 
     ``n_trials`` must be supplied explicitly (number of independent
-    configurations actually tested).
+    configurations actually tested). ``T`` is ``len(returns)`` — the evaluated
+    return series length — and is recorded as ``n_obs``. ``var_trial_sharpes``
+    and ``observed_sharpe`` share the non-annualized scale.
     """
     report = sharpe_ratio(returns)
+    # T := number of observations in the evaluated return series (not fold count).
+    if report.n_obs != int(np.asarray(returns, dtype=np.float64).reshape(-1).size):
+        msg = "internal error: Sharpe n_obs must equal return series length"
+        raise RuntimeError(msg)
     sr0 = expected_max_sharpe(n_trials, var_trial_sharpes)
     dsr = _dsr_from_moments(
         observed_sharpe=report.sharpe,
