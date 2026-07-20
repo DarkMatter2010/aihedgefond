@@ -23,6 +23,7 @@ from aihedgefund.research.gate import (
     run_overfitting_gate,
     scores_to_strategy_returns,
 )
+from aihedgefund.research.meta_labeling import run_meta_labeling_triage
 from aihedgefund.research.metrics import compute_ic_metrics
 from aihedgefund.research.model_hash import compute_model_hash
 from aihedgefund.research.research_trials import (
@@ -63,6 +64,7 @@ __all__ = [
     "run_all_new_gate",
     "run_baseline",
     "run_feature_class_triage",
+    "run_meta_labeling_triage",
     "run_overfitting_gate",
     "run_universe_breadth_diagnostic",
     "scores_to_strategy_returns",

@@ -34,18 +34,18 @@ Pearson IC; rows 13+ use the live run's Rank-IC and median breadth).
 21. Feature-class triage all_new h=21            → 0.775
 22. Feature-class triage new_plus_old h=2        → 0.335
 23. Feature-class triage new_plus_old h=21       → 0.508
+24. Meta-labeling triage (SMA-10 + TB + LGBM binary, broad,
+    filtered OOS bet Sharpe, live 2026-07-20)     → 0.049881
 
 These are selection-bias inputs, not CPCV path diagnostics.
 
 ``N_RESEARCH_TRIALS`` (conservative count for DSR)
 -------------------------------------------------
 Bailey DSR uses ``n_trials`` for the expected-max-SR null under selection bias.
-All 23 rows above are logged ICs from distinct configurations (12 legacy +
-1 breadth diagnostic previously flagged but unlogged + 10 feature-class triage
-configs = 5 classes × h={2,21}).
+All 24 rows above are logged outcomes from distinct configurations (12 legacy +
+1 breadth diagnostic + 10 feature-class triage + 1 meta-labeling triage).
 
-``N_RESEARCH_TRIALS = 23`` equals ``len(RESEARCH_TRIAL_SHARPES)`` — no defensive
-round-up remaining once the breadth diagnostic and triage rows are logged.
+``N_RESEARCH_TRIALS = 24`` equals ``len(RESEARCH_TRIAL_SHARPES)``.
 Variance still comes from the full logged Sharpe tuple.
 """
 
@@ -82,11 +82,13 @@ RESEARCH_TRIAL_SHARPES: tuple[float, ...] = (
     0.775,
     0.335,
     0.508,
+    # 24. Meta-labeling triage (live 2026-07-20): filtered OOS bet Sharpe
+    0.049881,
 )
 
 # Selection-bias headcount for live gate scripts (see module doc).
 # Must be >= len(RESEARCH_TRIAL_SHARPES); must not track len() alone.
-N_RESEARCH_TRIALS: int = 23
+N_RESEARCH_TRIALS: int = 24
 
 
 def variance_of_trial_sharpes(sharpes: Sequence[float]) -> float:
