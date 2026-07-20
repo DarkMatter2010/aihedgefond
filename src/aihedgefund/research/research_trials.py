@@ -6,10 +6,10 @@ Sharpes (those share overlapping train/test windows and are not i.i.d. trials).
 
 Source of ``RESEARCH_TRIAL_SHARPES`` (variance table)
 ----------------------------------------------------
-Twelve non-annualized daily IR proxies on the same scale as the gate's
-observed Sharpe (CS long/short portfolio return mean/std). Values are
-Grinold-style ``IC * sqrt(breadth)`` with breadth=50 (Phase-2 universe),
-using the live IC / rank-IC figures recorded for each configuration:
+Non-annualized daily IR proxies on the same scale as the gate's observed Sharpe
+(CS long/short portfolio return mean/std). Values are Grinold-style
+``Rank-IC * sqrt(median_cs_breadth)`` (rows 1–12 historically used breadth=50 /
+Pearson IC; rows 13+ use the live run's Rank-IC and median breadth).
 
 1. Phase-2 baseline h=5 (pre-CA diagnostics)     IC≈0.0106 → 0.075
 2. 50-symbol IC validation                       IC≈0.010  → 0.071
@@ -23,24 +23,30 @@ using the live IC / rank-IC figures recorded for each configuration:
 10. Multi-horizon sweep h=20                     IC≈−0.010 → −0.071
 11. Momentum-breadth probe h=63                  rank_IC≈−0.009 → −0.064
 12. Momentum-breadth probe h=126                 rank_IC≈−0.042 → −0.297
+13. Universe-breadth diagnostic h=2 (broad)      rank_IC≈0.014808, N≈494 → 0.329
+14. Feature-class triage reversal h=2            → 0.239
+15. Feature-class triage reversal h=21           → 0.199
+16. Feature-class triage low_vol h=2             → 0.375
+17. Feature-class triage low_vol h=21            → 1.078
+18. Feature-class triage range_vol h=2           → 0.075
+19. Feature-class triage range_vol h=21          → 0.746
+20. Feature-class triage all_new h=2             → 0.492
+21. Feature-class triage all_new h=21            → 0.775
+22. Feature-class triage new_plus_old h=2        → 0.335
+23. Feature-class triage new_plus_old h=21       → 0.508
 
 These are selection-bias inputs, not CPCV path diagnostics.
 
 ``N_RESEARCH_TRIALS`` (conservative count for DSR)
 -------------------------------------------------
 Bailey DSR uses ``n_trials`` for the expected-max-SR null under selection bias.
-Counting only the 12 *logged* IC rows above understates the true multiple-testing
-burden (intermediate feature / horizon / universe probes that were tried but not
-written into the IC table).
+All 23 rows above are logged ICs from distinct configurations (12 legacy +
+1 breadth diagnostic previously flagged but unlogged + 10 feature-class triage
+configs = 5 classes × h={2,21}).
 
-Documented configuration families (≥10 distinct trials):
-  Baseline, CA-Fix, Feature-Set #17, Sweep h=1/2/5/10/20, Mom-Breadth h=63/126
-plus the earlier diagnostics rows in the variance table (50-symbol validation,
-test_start bar-gap, pre-CA baseline) → 12 logged ICs.
-
-Round defensively **up** to ``N_RESEARCH_TRIALS = 15`` so DSR is not falsely
-optimistic. Variance still comes from the 12 logged Sharpes (dispersion of
-observed research outcomes); ``n_trials`` is the selection-bias headcount.
+``N_RESEARCH_TRIALS = 23`` equals ``len(RESEARCH_TRIAL_SHARPES)`` — no defensive
+round-up remaining once the breadth diagnostic and triage rows are logged.
+Variance still comes from the full logged Sharpe tuple.
 """
 
 from __future__ import annotations
@@ -63,11 +69,24 @@ RESEARCH_TRIAL_SHARPES: tuple[float, ...] = (
     -0.071,
     -0.064,
     -0.297,
+    # 13. Universe-breadth diagnostic (broad, h=2): 0.014808 * sqrt(494)
+    0.329,
+    # 14–23. Feature-class IC triage (live 2026-07-19, seed=42, N≈494)
+    0.239,
+    0.199,
+    0.375,
+    1.078,
+    0.075,
+    0.746,
+    0.492,
+    0.775,
+    0.335,
+    0.508,
 )
 
-# Conservative selection-bias headcount for live gate scripts (see module doc).
+# Selection-bias headcount for live gate scripts (see module doc).
 # Must be >= len(RESEARCH_TRIAL_SHARPES); must not track len() alone.
-N_RESEARCH_TRIALS: int = 15
+N_RESEARCH_TRIALS: int = 23
 
 
 def variance_of_trial_sharpes(sharpes: Sequence[float]) -> float:

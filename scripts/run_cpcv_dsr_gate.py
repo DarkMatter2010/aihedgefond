@@ -6,8 +6,8 @@ Phase-3 overfitting gate.
 
 n_trials / var_trial_sharpes
 ----------------------------
-``n_trials = N_RESEARCH_TRIALS`` (15, conservatively rounded up from ≥10
-documented Feature/Horizont/Universe configs — see ``research_trials``).
+``n_trials = N_RESEARCH_TRIALS`` (see ``research_trials.py``; currently 23 logged
+configs including breadth diagnostic + feature-class triage).
 ``var_trial_sharpes`` is the sample variance of ``RESEARCH_TRIAL_SHARPES``
 (documented IC-implied daily IR proxies) — never CPCV path-Sharpe variance.
 

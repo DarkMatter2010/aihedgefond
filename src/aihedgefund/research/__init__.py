@@ -9,6 +9,10 @@ from aihedgefund.research.deflated_sharpe import (
     expected_max_sharpe,
     sharpe_ratio,
 )
+from aihedgefund.research.feature_class_triage import (
+    run_feature_class_triage,
+    settings_for_feature_class_triage,
+)
 from aihedgefund.research.forward_labels import make_forward_return_labels
 from aihedgefund.research.gate import (
     merge_cpcv_path_returns,
@@ -52,10 +56,12 @@ __all__ = [
     "predict_scores",
     "research_trial_sharpe_variance",
     "run_baseline",
+    "run_feature_class_triage",
     "run_overfitting_gate",
     "run_universe_breadth_diagnostic",
     "scores_to_strategy_returns",
     "settings_for_breadth_diagnostic",
+    "settings_for_feature_class_triage",
     "sharpe_ratio",
     "subset_by_positions",
     "time_embargo_split",
