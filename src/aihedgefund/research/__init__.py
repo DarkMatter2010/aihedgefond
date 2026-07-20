@@ -1,6 +1,10 @@
 """Research domain; concrete adapters live in ``research.adapters``."""
 
 from aihedgefund.research.adapters import FilesystemModelArtifactAdapter
+from aihedgefund.research.all_new_gate import (
+    assemble_all_new_dataset,
+    run_all_new_gate,
+)
 from aihedgefund.research.baseline import build_lgbm_params, predict_scores, train_baseline
 from aihedgefund.research.cpcv import combinatorial_purged_splits, subset_by_positions
 from aihedgefund.research.dataset import assemble_baseline_dataset
@@ -43,6 +47,7 @@ __all__ = [
     "N_RESEARCH_TRIALS",
     "RESEARCH_TRIAL_SHARPES",
     "SURVIVORSHIP_BIAS_NOTE",
+    "assemble_all_new_dataset",
     "assemble_baseline_dataset",
     "build_lgbm_params",
     "combinatorial_purged_splits",
@@ -55,6 +60,7 @@ __all__ = [
     "merge_cpcv_path_returns",
     "predict_scores",
     "research_trial_sharpe_variance",
+    "run_all_new_gate",
     "run_baseline",
     "run_feature_class_triage",
     "run_overfitting_gate",
