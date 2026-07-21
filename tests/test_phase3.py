@@ -544,8 +544,8 @@ def test_gate_verdict_schema_and_reproducibility() -> None:
 
 def test_research_trial_sharpes_source_not_cpcv_paths() -> None:
     """var_trial_sharpes from logged Sharpes; n_trials matches logged headcount."""
-    assert N_RESEARCH_TRIALS == 24
-    assert len(RESEARCH_TRIAL_SHARPES) == 24
+    assert N_RESEARCH_TRIALS == 25
+    assert len(RESEARCH_TRIAL_SHARPES) == 25
     assert N_RESEARCH_TRIALS >= len(RESEARCH_TRIAL_SHARPES)
     assert research_trial_sharpe_variance() > 0.0
 

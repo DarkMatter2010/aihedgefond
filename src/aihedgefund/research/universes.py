@@ -1,9 +1,13 @@
 """Shared research universes (deterministic tickers, no live fetch).
 
-``BROAD_LIQUID_CANDIDATE_UNIVERSE`` is the S&P-500-near ticker list used by
+`BROAD_LIQUID_CANDIDATE_UNIVERSE` is the S&P-500-near ticker list used by
 the Phase-2 momentum-breadth probe. It is today's membership → mild
 survivorship bias; suitable for relative diagnostics only, not as a
 tradeable alpha claim.
+
+`SMALL_CAP_CANDIDATE_UNIVERSE` is a liquid US small/mid snapshot outside
+that broad list (Russell-2000-segment style). Survivorship bias is stronger
+for small caps; relative diagnosis only.
 """
 
 from __future__ import annotations
@@ -84,3 +88,42 @@ BROAD_LIQUID_CANDIDATE_UNIVERSE: Final[tuple[str, ...]] = (
 )
 # fmt: on
 
+SMALL_CAP_SURVIVORSHIP_BIAS_NOTE: Final[str] = (
+    "SMALL_CAP_CANDIDATE_UNIVERSE is a static snapshot of liquid US small/mid "
+    "names outside the S&P-near broad list (Russell-2000-segment style). Current "
+    "membership plus small-cap delistings intensify survivorship bias vs large-cap; "
+    "results are a relative universe diagnosis only, not a tradeable alpha proof."
+)
+
+# fmt: off
+SMALL_CAP_CANDIDATE_UNIVERSE: Final[tuple[str, ...]] = (
+    "AAOI", "AAT", "ABCB", "ABG", "ABR", "ACA", "ACAD", "ACHC",
+    "ACIW", "ACLS", "ADC", "ADUS", "AEO", "AFG", "AGIO", "AGM",
+    "AGX", "AHH", "AIN", "AIR", "AIT", "AKR", "AL", "ALGT",
+    "ALKS", "ALKT", "ALSN", "ALX", "AMBA", "AMED", "AMKR", "AMN",
+    "AMPH", "AMR", "AN", "ANDE", "ANF", "ANIP", "AORT", "AOSL",
+    "APAM", "APG", "APLS", "APOG", "AR", "ARCB", "AROC", "ARWR",
+    "ASB", "ASGN", "ASH", "ASO", "ASTE", "ASTH", "ASTS", "AT",
+    "ATGE", "ATI", "ATKR", "ATNI", "ATR", "ATRC", "AUB", "AVA",
+    "AVAV", "AVNT", "AVT", "AWI", "AX", "AXSM", "AXTA", "AZZ",
+    "BANC", "BANF", "BANR", "BCPC", "BDC", "BE", "BEAM", "BELFB",
+    "BFH", "BGC", "BGS", "BHE", "BHF", "BHLB", "BJ", "BKE",
+    "BKU", "BL", "BLBD", "BLKB", "BMI", "BOH", "BOOT", "BOX",
+    "BPMC", "BPOP", "BRBR", "BRC", "BRKL", "BRY", "BTU", "BURL",
+    "BUSE", "BV", "BXC", "BY", "BYD", "CABO", "CAC", "CADE",
+    "CAL", "CALM", "CALX", "CARG", "CARS", "CASH", "CATY", "CAVA",
+    "CBRL", "CBU", "CCOI", "CCS", "CDE", "CDP", "CDRE", "CENTA",
+    "CENX", "CERT", "CEVA", "CFR", "CGNX", "CHCO", "CHE", "CHEF",
+    "CHRD", "CHWY", "CIVI", "CLF", "CLH", "CLS", "CLSK", "CMC",
+    "CNO", "CNX", "CNXC", "COKE", "COLB", "COLL", "COLM", "CORT",
+    "COUR", "CPRX", "CRC", "CRGY", "CRI", "CRK", "CRNX", "CROX",
+    "CRSP", "CRUS", "CSGS", "CSWC", "CTKB", "CTRE", "CTS", "CUBI",
+    "CVBF", "CVCO", "CVI", "CVLT", "CW", "CWAN", "CWK", "CWT",
+    "CYTK", "DAN", "DAR", "DBX", "DCOM", "DDS", "DEI", "DFH",
+    "DGII", "DHT", "DIOD", "DK", "DKS", "DNLI", "DOCN", "DOCS",
+    "DOLE", "DORM", "DRH", "DT", "DV", "DXC", "DY", "EAT",
+    "EBC", "ECVT", "EEFT", "EGBN", "EHC", "ELAN", "ELF", "ELME",
+    "ELS", "EMBC", "ENOV", "ENS", "ENSG", "ENVA", "ENVX", "EPAC",
+    "EPC", "EPRT", "EQH", "ESAB",
+)
+# fmt: on
