@@ -1,0 +1,61 @@
+# P3 Meta-Labeling CPCV/DSR Gate
+
+**Date:** 2026-07-21  
+**Script:** scripts/run_gate_on_meta_labeling.py  
+**Seed:** 42  
+**Universe:** BROAD_LIQUID_CANDIDATE_UNIVERSE (kept 496)  
+**n_events:** 1,290,228  
+**Does not increment** N_RESEARCH_TRIALS (already row 24 from triage)
+
+## Setup (pre-registered)
+
+| Knob | Value |
+|------|--------|
+| Primary | SMA-10 sign |
+| Meta | Triple-Barrier + LGBM binary accept (P>=0.5) |
+| Features | ALL_NEW_FEATURE_CLASS_COLUMNS (15) |
+| CPCV | N=6, k=2, horizon=embargo=vertical_bars=10 |
+| n_trials | 24 (RESEARCH_TRIAL_SHARPES variance) |
+| DSR threshold | 0.95 |
+| Permutation null | M=10 live (AIHF_GATE_N_PERMUTATIONS; module constant remains 100) |
+
+## Primary gate result
+
+| Metric | Value |
+|--------|--------|
+| Verdict | **NEIN** |
+| DSR | **5.48e-159** |
+| Observed Sharpe | 0.121 |
+| SR0 | 0.622 |
+| n_obs (T) | 2693 |
+| path Sharpe mean +/- std | 0.119 +/- 0.025 |
+
+DSR << 0.95 because observed Sharpe (0.12) is far below the selection-bias null SR0 (0.62) under 24 trials.
+
+## Permutation null (M=10)
+
+| Metric | Value |
+|--------|--------|
+| null DSR q50 | ~6.5e-240 |
+| null DSR q95 | ~3.8e-224 |
+| real percentile vs null | 100% (beats null q95) |
+| gate_dsr_ge_0.95 | **False** |
+| Corrected verdict | **NEIN** |
+
+Beating the permutation null is irrelevant: the hardened gate already fails DSR >= 0.95.
+
+## Interpretation
+
+**Corrected verdict: NEIN.**
+
+Meta-labeling cleared the Phase-2 triage bar (Precision/Sharpe lift) but does **not** survive CPCV/DSR. Same outcome family as the all_new regression gate (#26).
+
+## Recommendation
+
+**Stop free-yfinance OHLCV signal search** on this universe. No Phase-4 without a DSR-validated signal. Treat Phase 0-3 as a working infrastructure / learning deliverable.
+
+## HANDOFF
+
+- Module: aihedgefund.research.meta_labeling_gate
+- Script: scripts/run_gate_on_meta_labeling.py
+- Next: document project as pipeline-complete without tradable alpha; optional paid data / new asset class only with a fresh research-trial budget — not more free OHLCV feature/label variants.
