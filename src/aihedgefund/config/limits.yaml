@@ -74,6 +74,11 @@ quality:
   zscore_cap: 8.0
   max_last_bar_age_days: 7
 
+edgar:
+  user_agent: "AIHedgeFond Research aihedgefond@example.com"
+  cache_dir: .cache/sec_edgar
+  max_rps: 8.0
+
 labels:
   vol_span: 20
   cusum_threshold: 0.02

@@ -10,6 +10,13 @@ from aihedgefund.features.feature_classes import (
     REVERSAL_SIGN_NOTE,
     build_triage_feature_matrix,
 )
+from aihedgefund.features.insider import (
+    INSIDER_FEATURE_CLASS_CONFIGS,
+    INSIDER_FEATURE_COLUMNS,
+    INSIDER_PIT_NOTE,
+    INSIDER_PLUS_ALL_NEW_FEATURE_COLUMNS,
+    build_insider_feature_matrix,
+)
 from aihedgefund.features.pipeline import (
     FEATURE_COLUMNS,
     FeatureParameters,
@@ -25,12 +32,17 @@ __all__ = [
     "FEATURE_COLUMNS",
     "FeatureParameters",
     "FeaturePipeline",
+    "INSIDER_FEATURE_CLASS_CONFIGS",
+    "INSIDER_FEATURE_COLUMNS",
+    "INSIDER_PIT_NOTE",
+    "INSIDER_PLUS_ALL_NEW_FEATURE_COLUMNS",
     "LOW_VOL_FEATURE_COLUMNS",
     "NEW_PLUS_OLD_FEATURE_COLUMNS",
     "RANGE_VOL_FEATURE_COLUMNS",
     "REVERSAL_FEATURE_COLUMNS",
     "REVERSAL_SIGN_NOTE",
     "assert_no_lookahead",
+    "build_insider_feature_matrix",
     "build_triage_feature_matrix",
     "compute_symbol_features",
     "pit_join",

@@ -221,6 +221,97 @@ class MarketDataRequest(BoundaryDTO):
         return self
 
 
+class Form4Request(BoundaryDTO):
+    """Multi-symbol Form 4 ingest window (UTC).
+
+    PIT rule: features must key off ``filed_at`` / acceptance time, never
+    ``transaction_date`` alone (filings may lag the trade by up to ~2 days).
+    """
+
+    symbols: Annotated[tuple[Symbol, ...], Field(min_length=1)]
+    start: AwareDatetime
+    end: AwareDatetime
+
+    @field_validator("symbols")
+    @classmethod
+    def symbols_must_be_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject ambiguous duplicate symbols."""
+        if len(value) != len(set(value)):
+            msg = "form4 symbols must be unique"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("start", "end")
+    @classmethod
+    def timestamps_must_be_utc(cls, value: datetime) -> datetime:
+        """Require UTC request boundaries."""
+        if value.utcoffset() != timedelta(0):
+            msg = "form4 request timestamps must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+    @model_validator(mode="after")
+    def end_must_follow_start(self) -> Form4Request:
+        """Reject empty and reversed ingest windows."""
+        if self.end <= self.start:
+            msg = "form4 request end must be later than start"
+            raise ValueError(msg)
+        return self
+
+
+class Form4Record(BoundaryDTO):
+    """One insider transaction row extracted from a Form 4 filing.
+
+    ``filed_at`` is the SEC acceptance timestamp (PIT-safe). ``transaction_date``
+    is the trade date inside the form and is informational only.
+    """
+
+    symbol: Symbol
+    cik: NonEmptyText
+    accession: NonEmptyText
+    filed_at: AwareDatetime
+    transaction_date: date | None
+    transaction_code: NonEmptyText
+    shares: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    price: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None
+    acquired_disposed: Literal["A", "D"]
+    reporting_owner: NonEmptyText | None = None
+
+    @field_validator("filed_at")
+    @classmethod
+    def filed_at_must_be_utc(cls, value: datetime) -> datetime:
+        """Require UTC filing acceptance timestamps."""
+        if value.utcoffset() != timedelta(0):
+            msg = "filed_at must use UTC"
+            raise ValueError(msg)
+        return value.astimezone(UTC)
+
+
+class Form4Frame(BoundaryDTO):
+    """Validated Form 4 rows for a request; empty records is normal (no activity)."""
+
+    records: tuple[Form4Record, ...]
+    symbols_queried: Annotated[tuple[Symbol, ...], Field(min_length=1)]
+    symbols_without_filings: tuple[Symbol, ...] = ()
+
+    @model_validator(mode="after")
+    def without_filings_must_be_subset(self) -> Form4Frame:
+        """``symbols_without_filings`` must be a subset of queried symbols."""
+        queried = set(self.symbols_queried)
+        missing = set(self.symbols_without_filings)
+        if not missing.issubset(queried):
+            msg = "symbols_without_filings must be a subset of symbols_queried"
+            raise ValueError(msg)
+        return self
+
+
+class IngestedForm4Data(BoundaryDTO):
+    """Typed payload for a successful Form 4 ingest."""
+
+    request: Form4Request
+    data: Form4Frame
+
+
 class OHLCVBar(BoundaryDTO):
     """Vendor-neutral market-data response item."""
 
@@ -503,6 +594,22 @@ class DataIngested(Event):
             symbol: len(frame)
             for symbol, frame in self.payload.data.bars.items()
         }
+
+
+class Form4Ingested(Event):
+    """Fact emitted after Form 4 rows are quality-checked."""
+
+    payload: IngestedForm4Data
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """Expose queried symbols."""
+        return self.payload.request.symbols
+
+    @property
+    def n_records(self) -> int:
+        """Expose validated transaction row count."""
+        return len(self.payload.data.records)
 
 
 class QualityGateFailed(Event):

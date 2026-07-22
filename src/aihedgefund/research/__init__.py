@@ -23,6 +23,10 @@ from aihedgefund.research.gate import (
     run_overfitting_gate,
     scores_to_strategy_returns,
 )
+from aihedgefund.research.insider_triage import (
+    run_insider_form4_triage,
+    settings_for_insider_triage,
+)
 from aihedgefund.research.meta_labeling import run_meta_labeling_triage
 from aihedgefund.research.meta_labeling_gate import run_meta_labeling_gate
 from aihedgefund.research.metrics import compute_ic_metrics
@@ -33,6 +37,10 @@ from aihedgefund.research.research_trials import (
     research_trial_sharpe_variance,
 )
 from aihedgefund.research.run_baseline import load_sidecar, run_baseline, write_sidecar
+from aihedgefund.research.small_cap_universe_diagnostic import (
+    run_small_cap_universe_diagnostic,
+    settings_for_small_cap_universe_diagnostic,
+)
 from aihedgefund.research.split import time_embargo_split
 from aihedgefund.research.universe_breadth_diagnostic import (
     run_universe_breadth_diagnostic,
@@ -40,6 +48,8 @@ from aihedgefund.research.universe_breadth_diagnostic import (
 )
 from aihedgefund.research.universes import (
     BROAD_LIQUID_CANDIDATE_UNIVERSE,
+    SMALL_CAP_CANDIDATE_UNIVERSE,
+    SMALL_CAP_SURVIVORSHIP_BIAS_NOTE,
     SURVIVORSHIP_BIAS_NOTE,
 )
 
@@ -48,6 +58,8 @@ __all__ = [
     "FilesystemModelArtifactAdapter",
     "N_RESEARCH_TRIALS",
     "RESEARCH_TRIAL_SHARPES",
+    "SMALL_CAP_CANDIDATE_UNIVERSE",
+    "SMALL_CAP_SURVIVORSHIP_BIAS_NOTE",
     "SURVIVORSHIP_BIAS_NOTE",
     "assemble_all_new_dataset",
     "assemble_baseline_dataset",
@@ -65,13 +77,17 @@ __all__ = [
     "run_all_new_gate",
     "run_baseline",
     "run_feature_class_triage",
+    "run_insider_form4_triage",
     "run_meta_labeling_gate",
     "run_meta_labeling_triage",
     "run_overfitting_gate",
+    "run_small_cap_universe_diagnostic",
     "run_universe_breadth_diagnostic",
     "scores_to_strategy_returns",
     "settings_for_breadth_diagnostic",
     "settings_for_feature_class_triage",
+    "settings_for_insider_triage",
+    "settings_for_small_cap_universe_diagnostic",
     "sharpe_ratio",
     "subset_by_positions",
     "time_embargo_split",

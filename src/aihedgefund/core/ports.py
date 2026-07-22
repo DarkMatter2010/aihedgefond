@@ -7,6 +7,8 @@ from pathlib import Path
 
 from aihedgefund.core.schemas import (
     Fill,
+    Form4Frame,
+    Form4Request,
     ModelArtifactLoadResult,
     ModelArtifactSaveRequest,
     OHLCVBar,
@@ -22,6 +24,19 @@ class DataVendorPort(ABC):
     @abstractmethod
     def get_ohlcv(self, request: OHLCVRequest) -> tuple[OHLCVBar, ...]:
         """Return validated bars for a typed request."""
+
+
+class InsiderFilingPort(ABC):
+    """Port implemented by SEC Form 4 (insider) filing adapters.
+
+    Point-in-time note: only ``filed_at`` (acceptance time) is safe to use as
+    the availability timestamp. ``transaction_date`` may precede filing by up
+    to ~2 business days and must not drive feature availability.
+    """
+
+    @abstractmethod
+    def get_form4(self, request: Form4Request) -> Form4Frame:
+        """Return validated Form 4 transaction rows for the request window."""
 
 
 class BrokerPort(ABC):

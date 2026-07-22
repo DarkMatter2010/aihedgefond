@@ -44,6 +44,22 @@ class QualitySettings(ConfigModel):
     max_last_bar_age_days: Annotated[int, Field(ge=0)]
 
 
+class EdgarSettings(ConfigModel):
+    """Official SEC EDGAR (data.sec.gov) Form 4 adapter settings."""
+
+    user_agent: NonEmptyText
+    cache_dir: Path
+    max_rps: Annotated[float, Field(gt=0, le=10)]
+
+    @field_validator("cache_dir", mode="before")
+    @classmethod
+    def coerce_cache_dir(cls, value: object) -> object:
+        """Accept YAML strings while keeping a typed Path."""
+        if isinstance(value, str):
+            return Path(value)
+        return value
+
+
 class LabelSettings(ConfigModel):
     """Event sampling and triple-barrier parameters."""
 
@@ -110,6 +126,7 @@ class Settings(ConfigModel):
     frequency: Literal["1d"]
     symbol_aliases: dict[NonEmptyText, NonEmptyText]
     quality: QualitySettings
+    edgar: EdgarSettings
     labels: LabelSettings
     fracdiff: FracDiffSettings
     artifact_root: Path

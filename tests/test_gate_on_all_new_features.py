@@ -80,7 +80,7 @@ def test_all_new_gate_constants() -> None:
     assert PRIMARY_HORIZON == 21
     assert SECONDARY_HORIZON == 2
     assert SEED == 42
-    assert N_TRIALS == N_RESEARCH_TRIALS == 24
+    assert N_TRIALS == N_RESEARCH_TRIALS == 29
     assert N_BLOCKS == 6 and N_TEST_BLOCKS == 2
     assert N_PERMUTATIONS == 100
     assert DSR_THRESHOLD == 0.95
