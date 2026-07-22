@@ -23,6 +23,9 @@ from aihedgefund.research.gate import (
     run_overfitting_gate,
     scores_to_strategy_returns,
 )
+from aihedgefund.research.insider_combo_gate import (
+    run_insider_combo_gate,
+)
 from aihedgefund.research.insider_triage import (
     run_insider_form4_triage,
     settings_for_insider_triage,
@@ -77,6 +80,7 @@ __all__ = [
     "run_all_new_gate",
     "run_baseline",
     "run_feature_class_triage",
+    "run_insider_combo_gate",
     "run_insider_form4_triage",
     "run_meta_labeling_gate",
     "run_meta_labeling_triage",
