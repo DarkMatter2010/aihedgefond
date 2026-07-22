@@ -70,7 +70,7 @@ def _bars(n: int = 8, rows: int = 220) -> BarFrame:
 
 
 def test_meta_gate_constants() -> None:
-    assert N_TRIALS == N_RESEARCH_TRIALS == 24
+    assert N_TRIALS == N_RESEARCH_TRIALS == 25
     assert N_BLOCKS == 6 and N_TEST_BLOCKS == 2
     assert N_PERMUTATIONS == 100
     assert DSR_THRESHOLD == 0.95
